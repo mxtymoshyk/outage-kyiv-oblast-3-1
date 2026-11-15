@@ -2,10 +2,10 @@
 
 Checks the DTEK Kyiv-oblast schedule for queue 3.1 every 10 minutes and sends to Telegram:
 
-- **Schedule**: when today's or tomorrow's schedule changes, or tomorrow's is published. Sent as a photo (the same DTEK table image that Svitlobot posts) with a caption: what changed, a monospace timeline for the days, and exact times. If the image is unavailable, the text is sent without it.
+- **Schedule**: when today's or tomorrow's schedule changes, or tomorrow's is published. Sent as a photo (the DTEK table, like Svitlobot) with a caption: a news line on top, then each day in order with exact times and what changed. If the image is unavailable, the text is sent without it.
 - **Reminder** about 1 hour before each outage, including ones that run past midnight.
 - Messages between 23:00 and 07:00 arrive **silently** (no sound).
-- **Alert if the data source breaks** (no updates for 3+ hours, or DTEK's site blocks the parser) and a follow-up when it recovers. Silence never means "no changes" while the data is broken.
+- **Alert if the data source breaks** (no updates for 3+ hours, DTEK's site blocks the parser, or the data has no schedule for the queue) and a follow-up when it recovers. Silence never means "no changes" while the data is broken.
 - **Calendar** `outage.ics`: outages appear as events in iPhone/Mac Calendar, with an alarm 30 minutes before. History is kept for 2 weeks.
 
 ## Calendar subscription
@@ -29,4 +29,7 @@ Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirro
 | `QUIET` | `23-7` | Hours when messages arrive without sound (empty = always with sound) |
 
 ## Legend
-Image: the DTEK day table (today/tomorrow) with its legend; the weekly forecast is cropped out. ✏️ day changed · 🆕 new day
+Image: `gpv-3-1-emergency.png` from the same mirror commit as the data (day table + legend, no weekly forecast). ✏️ day changed · 🆕 new day
+
+## Tests
+`python3 -m unittest discover -s tests -v`: the main scenarios (new day, change, possible outages only, manual run, reminders including past midnight, data-source alerts, failed delivery, calendar). They run in Actions before every check.

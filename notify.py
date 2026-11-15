@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
-"""DTEK Kyiv-oblast outage schedule -> Telegram.
+"""DTEK Kyiv-oblast outage schedule -> Telegram + calendar feed.
 
-Two kinds of messages:
-  * schedule  - when today's/tomorrow's schedule for the group changes
-                (or tomorrow's is published); shows what changed
+Messages:
+  * schedule  - when today's/tomorrow's schedule for the group changes or a new day
+                is published: DTEK day-table picture + text (news, then each day)
   * reminder  - ~REMIND_MIN minutes before each planned outage
-Messages between QUIET hours are delivered silently. Stdlib only.
+  * health    - once if the data source is broken for 1h+, once when it recovers
+Messages between QUIET hours are silent. Also writes outage.ics. Stdlib only.
+
+Data: github.com/Baskerville42/outage-data-ua. JSON and pictures are read from one
+commit, so the picture always matches the text.
 
 Env:
-  TG_TOKEN, TG_CHAT_ID  Telegram bot token / chat id (empty = dry run)
-  GROUP        default GPV3.1
-  REGION       default kyiv-region
-  REMIND_MIN   reminder lead time in minutes, default 60 (0 = off)
-  QUIET        silent hours "23-7" (empty = never silent)
-  STATE_FILE   default state.json
-  SOURCE_FILE  local JSON instead of download (tests)
-  TEST_NOW     ISO datetime to pretend "now" (tests)
-  FORCE        send the schedule even if nothing changed
+  TG_TOKEN, TG_CHAT_ID  bot token / comma-separated chat ids (empty = dry run)
+  GROUP        default GPV3.1          REGION      default kyiv-region
+  REMIND_MIN   default 60 (0 = off)    QUIET       default "23-7" (empty = never)
+  STALE_MIN    default 180             STATE_FILE  default state.json
+  ICS_FILE     default outage.ics
+  tests: SOURCE_FILE (local JSON), TEST_NOW (ISO datetime), NO_IMAGE, FORCE
 """
 import datetime as dt
 import hashlib
+import html
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -32,16 +35,18 @@ KYIV = ZoneInfo("Europe/Kyiv")
 GROUP = os.environ.get("GROUP", "GPV3.1")
 REGION = os.environ.get("REGION", "kyiv-region")
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+ICS_FILE = os.environ.get("ICS_FILE", "outage.ics")
 REMIND_MIN = int(os.environ.get("REMIND_MIN", "60") or 0)
 QUIET = os.environ.get("QUIET", "23-7")
 STALE_MIN = int(os.environ.get("STALE_MIN", "180"))   # source older than this = broken
-ICS_FILE = os.environ.get("ICS_FILE", "outage.ics")
+ALERT_AFTER_MIN = 60                                   # problem must persist this long
 ICS_KEEP_DAYS = 14
-BASE = "https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main"
-SRC = f"{BASE}/data/{REGION}.json"
+
+MIRROR = "Baskerville42/outage-data-ua"
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 Q = GROUP.replace("GPV", "")
-IMG = f"{BASE}/images/{REGION}/gpv-{Q.replace('.', '-')}.png"   # same table image Svitlobot posts
+IMG_NAMES = [f"gpv-{Q.replace('.', '-')}-emergency.png",   # day table + legend only
+             f"gpv-{Q.replace('.', '-')}.png"]             # fallback: day + weekly table
 
 # hour-slot value -> (first half, second half)
 SLOT = {
@@ -52,22 +57,14 @@ SLOT = {
 }
 
 
-# ---------- helpers ----------
+# ---------- time & schedule helpers ----------
 def now_kyiv():
     t = os.environ.get("TEST_NOW")
     return dt.datetime.fromisoformat(t).replace(tzinfo=KYIV) if t else dt.datetime.now(KYIV)
 
 
-def load_source():
-    if os.environ.get("SOURCE_FILE"):
-        with open(os.environ["SOURCE_FILE"], encoding="utf-8") as f:
-            return json.load(f)
-    req = urllib.request.Request(SRC, headers={"User-Agent": "outage-bot"})
-    with urllib.request.urlopen(req, timeout=30) as r:
-        return json.load(r)
-
-
 def half_hours(slots):
+    """DTEK hour slots {"1".."24": value} -> 48 half-hour states."""
     out = []
     for h in range(1, 25):
         out.extend(SLOT.get(slots.get(str(h), "yes"), ("on", "on")))
@@ -109,9 +106,12 @@ def off_list(states):
     return [[a, b] for s, a, b in runs(states) if s == "off"]
 
 
-# ---------- message parts ----------
+def total_off(offs):
+    return sum(b - a for a, b in offs)
+
+
 def span_list(idx):
-    """sorted half-hour indices -> 'HH:MM–HH:MM, …'"""
+    """Half-hour indices -> 'HH:MM–HH:MM, …'"""
     out, idx = [], sorted(idx)
     i = 0
     while i < len(idx):
@@ -127,14 +127,96 @@ def ranges(offs):
     return ", ".join(f"{hm(a)}–{hm(b)}" for a, b in offs)
 
 
+def schedule_hash(states):
+    return hashlib.sha1("".join(states).encode()).hexdigest()[:12]
+
+
+# ---------- data source ----------
+def mirror_commit():
+    """Latest commit of the mirror (git protocol: no API rate limits). None = use 'main'."""
+    try:
+        out = subprocess.run(["git", "ls-remote", f"https://github.com/{MIRROR}", "refs/heads/main"],
+                             capture_output=True, text=True, timeout=30, check=True).stdout
+        sha = out.split()[0]
+        return sha if len(sha) == 40 else None
+    except Exception as e:
+        print(f"::warning::mirror commit not resolved, using main: {e}")
+        return None
+
+
+def raw_url(ref, path):
+    return f"https://raw.githubusercontent.com/{MIRROR}/{ref or 'main'}/{path}"
+
+
+def http_get(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "outage-bot"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read()
+
+
+def load_source(ref):
+    if os.environ.get("SOURCE_FILE"):
+        with open(os.environ["SOURCE_FILE"], encoding="utf-8") as f:
+            return json.load(f)
+    return json.loads(http_get(raw_url(ref, f"data/{REGION}.json")))
+
+
+def fetch_image(ref):
+    """DTEK day-table picture from the same commit as the data; None if unavailable."""
+    if os.environ.get("NO_IMAGE") or os.environ.get("SOURCE_FILE"):
+        return None
+    for name in IMG_NAMES:
+        try:
+            data = http_get(raw_url(ref, f"images/{REGION}/{name}"))
+            if data[:8] == b"\x89PNG\r\n\x1a\n":
+                return data
+        except Exception as e:
+            print(f"::warning::image {name} not loaded: {e}")
+    return None
+
+
+def group_days(src, today):
+    """{date: 48 states} for our group, today and later."""
+    days = {}
+    for ts, groups in ((src.get("fact") or {}).get("data") or {}).items():
+        d = dt.datetime.fromtimestamp(int(ts), KYIV).date()
+        if d >= today and GROUP in groups:
+            days[d] = half_hours(groups[GROUP])
+    return days
+
+
+def source_problem(src, days, now):
+    """None if the data is usable, else a short human reason."""
+    if src is None:
+        return "не вдалося завантажити дані"
+    try:
+        upd = dt.datetime.fromisoformat(src["lastUpdated"].replace("Z", "+00:00"))
+    except (KeyError, ValueError, AttributeError):
+        return "невідомий формат даних"
+    age = (now - upd).total_seconds() / 60
+    if age > STALE_MIN:
+        return f"дані не оновлювались {until(age)}"
+    st = src.get("lastUpdateStatus") or {}
+    if st.get("ok") is False:
+        return f"сайт ДТЕК не віддає графік (код {st.get('code')})"
+    if not days:
+        return f"у даних немає графіка для черги {Q}"
+    return None
+
+
+# ---------- message text ----------
 def day_label(date, today):
-    return "Сьогодні" if date == today else "Завтра" if date == today + dt.timedelta(days=1) else f"{date:%d.%m}"
+    if date == today:
+        return "Сьогодні"
+    if date == today + dt.timedelta(days=1):
+        return "Завтра"
+    return f"{date:%d.%m}"
 
 
 def day_block(date, states, today, prev_off=None, is_new=False):
     """One self-contained block per day: header · total, times, and what changed."""
     offs = off_list(states)
-    total = sum(b - a for a, b in offs)
+    total = total_off(offs)
     edited = prev_off is not None and prev_off != offs
     mark = " ✏️" if edited else " 🆕" if is_new else ""
     head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>{mark}"
@@ -154,31 +236,58 @@ def day_block(date, states, today, prev_off=None, is_new=False):
     return "\n".join(lines)
 
 
-def title(days, today, changed, fresh, sent, first):
-    """First line(s) = the news, which is what a lock-screen preview shows."""
-    def total(d):
-        return sum(b - a for a, b in off_list(days[d]))
+def news_line(days, today, changed, fresh, sent):
+    """Top line(s) = the news; it is what a lock-screen preview shows. None = no news."""
+    if not changed:
+        return None
 
     def word(d):
-        return {today: "сьогодні", today + dt.timedelta(days=1): "завтра"}.get(d, f"{d:%d.%m}")
+        return day_label(d, today).lower() if d <= today + dt.timedelta(days=1) else f"{d:%d.%m}"
 
-    def amount(d):
-        t = total(d)
-        return f"без світла {dur(t)}" if t else "без відключень"
-
-    if first or not changed:
-        return None        # no news: the day blocks themselves come first
     news = []
     for d in sorted(changed):
+        offs = off_list(days[d])
         prev = sent.get(d.isoformat(), {}).get("off")
         if d in fresh:
-            news.append(f"🆕 <b>Графік на {word(d)}</b> · {amount(d)}")
-        elif prev != off_list(days[d]):
-            net = total(d) - sum(b - a for a, b in prev)
+            amount = f"без світла {dur(total_off(offs))}" if offs else "без відключень"
+            news.append(f"🆕 <b>Графік на {word(d)}</b> · {amount}")
+        elif prev != offs:
+            net = total_off(offs) - total_off(prev)
             delta = (f"без світла на {dur(abs(net))} {'більше' if net > 0 else 'менше'}"
                      if net else "час без світла той самий")
             news.append(f"✏️ <b>Змінився графік на {word(d)}</b> · {delta}")
     return "\n".join(news) or "🟡 <b>Оновлено можливі відключення</b>"
+
+
+def schedule_text(days, today, changed, sent, update_stamp):
+    first = not sent
+    fresh = [d for d in changed if d.isoformat() not in sent]
+    news = None if first else news_line(days, today, changed, fresh, sent)
+    parts = [news] if news else []
+    for d in sorted(days):                                   # chronological
+        prev = None if first else sent.get(d.isoformat(), {}).get("off")
+        parts.append(day_block(d, days[d], today, prev, is_new=(d in fresh and not first)))
+    parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {html.escape(str(update_stamp))}</i>")
+    return "\n\n".join(parts)
+
+
+def reminders_due(t_today, t_tom, now, reminded):
+    """[(key, text)] for outages starting within REMIND_MIN that weren't reminded yet."""
+    today = now.date()
+    tomorrow = today + dt.timedelta(days=1)
+    line = t_today + (t_tom or ["on"] * 48)
+    mins_now = now.hour * 60 + now.minute
+    out = []
+    for s, a, b in runs(line):
+        if s != "off" or a == 0:          # a == 0: continues from yesterday, not a new outage
+            continue
+        lead = a * 30 - mins_now
+        key = f"{(today if a < 48 else tomorrow).isoformat()}@{hm(a, True)}"
+        if 0 < lead <= REMIND_MIN and key not in reminded:
+            end = f"{hm(b)}{' завтра' if b > 48 else ''}"
+            out.append((key, f"⏰ <b>О {hm(a, True)} вимкнуть світло</b> · через {until(lead)}\n"
+                             f"До {end} · {dur(b - a)} без світла"))
+    return out
 
 
 # ---------- telegram ----------
@@ -189,84 +298,16 @@ def is_quiet(now):
     return (now.hour >= a or now.hour < b) if a > b else (a <= now.hour < b)
 
 
-def fetch_image():
-    if os.environ.get("NO_IMAGE"):
-        return None
-    try:
-        req = urllib.request.Request(IMG, headers={"User-Agent": "outage-bot"})
-        with urllib.request.urlopen(req, timeout=30) as r:
-            data = r.read()
-        if data[:8] != b"\x89PNG\r\n\x1a\n":
-            return None
-    except Exception as e:
-        print(f"::warning::image not loaded: {e}")
-        return None
-    return crop_image(data)
-
-
-def crop_image(png):
-    """Drop the weekly "possible outages" table (noise once DTEK publishes day-ahead
-    schedules). Layout: title, day table, [gap] weekly table, [gap] legend.
-    Any surprise in the layout -> send the original image."""
-    try:
-        try:
-            from PIL import Image
-        except ImportError:
-            if not os.environ.get("GITHUB_ACTIONS"):
-                return png
-            import subprocess
-            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--user",
-                            "--break-system-packages", "pillow"], check=True, timeout=120)
-            import site, importlib
-            sys.path.append(site.getusersitepackages())
-            importlib.invalidate_caches()
-            from PIL import Image
-        import io
-        im = Image.open(io.BytesIO(png)).convert("RGB")
-        w, hgt = im.size
-        px = im.load()
-        bg = px[5, 5]
-        empty = [all(px[x, y] == bg for x in range(0, w, 3)) for y in range(hgt)]
-        gaps, y = [], 0
-        while y < hgt:
-            if empty[y]:
-                s0 = y
-                while y < hgt and empty[y]:
-                    y += 1
-                if y - s0 >= 20:
-                    gaps.append((s0, y))
-            else:
-                y += 1
-        # inner gaps (not the top/bottom margins) that separate big blocks
-        inner = [g for g in gaps if g[0] > 0 and g[1] < hgt and g[1] - g[0] >= 30]
-        if len(inner) < 2:
-            return png
-        cut = inner[0][0] + (inner[0][1] - inner[0][0]) // 2      # after the day table
-        legend = inner[-1][0] + (inner[-1][1] - inner[-1][0]) // 2  # before the legend
-        if not (0.15 * hgt < cut < legend < hgt):
-            return png
-        out = Image.new("RGB", (w, cut + hgt - legend), bg)
-        out.paste(im.crop((0, 0, w, cut)), (0, 0))
-        out.paste(im.crop((0, legend, w, hgt)), (0, cut))
-        buf = io.BytesIO()
-        out.save(buf, "PNG", optimize=True)
-        return buf.getvalue()
-    except Exception as e:
-        print(f"::warning::crop failed, sending full image: {e}")
-        return png
-
-
 def tg(method, fields, file=None):
-    token = os.environ["TG_TOKEN"]
-    url = f"https://api.telegram.org/bot{token}/{method}"
+    url = f"https://api.telegram.org/bot{os.environ['TG_TOKEN']}/{method}"
     if file:  # multipart upload
         boundary = "outagebot" + hashlib.sha1(file).hexdigest()[:16]
-        body = b""
-        for k, v in fields.items():
-            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+        body = b"".join(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+                        for k, v in fields.items())
         body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"schedule.png\"\r\n"
                  "Content-Type: image/png\r\n\r\n").encode() + file + f"\r\n--{boundary}--\r\n".encode()
-        req = urllib.request.Request(url, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        req = urllib.request.Request(url, data=body,
+                                     headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     else:
         req = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode())
     try:
@@ -274,45 +315,43 @@ def tg(method, fields, file=None):
             return json.load(r)
     except urllib.error.HTTPError as e:
         return {"ok": False, "description": e.read().decode(errors="replace")}
+    except Exception as e:  # network errors
+        return {"ok": False, "description": str(e)}
 
 
 def send(text, now, photo=None):
-    """Text message, or a photo with the text as caption (falls back to text on any photo error)."""
+    """Deliver to every chat; photo with the text as caption, text-only on photo errors.
+    Returns True if at least one chat got it (a bad id must not cause resends to the rest)."""
     silent = is_quiet(now)
     token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat:
         tag = f" + photo {len(photo) // 1024} KB" if photo else ""
         print(f"---- DRY RUN{' (silent)' if silent else ''}{tag} ----\n{text}\n")
-        return
+        return True
     common = {"parse_mode": "HTML", "disable_notification": "true" if silent else "false"}
-    file_id = None
-    ok = 0
-    # TG_CHAT_ID may hold several ids separated by commas: "123,456,-100789"
+    file_id, ok = None, 0
     for cid in [c.strip() for c in chat.split(",") if c.strip()]:
         body = {"ok": False}
         if photo:
-            if file_id:
-                body = tg("sendPhoto", {**common, "chat_id": cid, "caption": text, "photo": file_id})
-            else:
-                body = tg("sendPhoto", {**common, "chat_id": cid, "caption": text}, file=photo)
-                if body.get("ok"):
-                    file_id = body["result"]["photo"][-1]["file_id"]
+            fields = {**common, "chat_id": cid, "caption": text}
+            body = tg("sendPhoto", {**fields, "photo": file_id}) if file_id else tg("sendPhoto", fields, file=photo)
+            if body.get("ok") and not file_id:
+                file_id = body["result"]["photo"][-1]["file_id"]   # upload once, reuse for others
             if not body.get("ok"):
                 print(f"::warning::photo to …{cid[-3:]} failed, sending text: {body.get('description')}")
         if not body.get("ok"):
-            body = tg("sendMessage", {**common, "chat_id": cid, "text": text, "disable_web_page_preview": "true"})
+            body = tg("sendMessage", {**common, "chat_id": cid, "text": text,
+                                      "disable_web_page_preview": "true"})
         if body.get("ok"):
             ok += 1
-        else:
-            # one bad id must not block the others (or cause resends to them); repo is public: never log full ids
+        else:  # repo is public: never log full chat ids
             print(f"::warning::Chat …{cid[-3:]} not delivered: {body.get('description')}")
-    if not ok:
-        sys.exit("Telegram: message not delivered to any chat")
+    return ok > 0
 
 
 # ---------- calendar feed (.ics) ----------
 def ics_events(cal):
-    """cal: {iso_date: states48} -> merged events across midnight [(state, start_dt, end_dt)]."""
+    """{iso_date: states48} -> [(state, start_dt, end_dt)], glued across midnight."""
     evs = []
     for iso in sorted(cal):
         base = dt.datetime.combine(dt.date.fromisoformat(iso), dt.time(), KYIV)
@@ -320,14 +359,14 @@ def ics_events(cal):
             if st == "on":
                 continue
             start, end = base + dt.timedelta(minutes=30 * a), base + dt.timedelta(minutes=30 * b)
-            if evs and evs[-1][0] == st and evs[-1][2] == start:   # glue 23:00-24:00 + 00:00-03:00
+            if evs and evs[-1][0] == st and evs[-1][2] == start:
                 evs[-1] = (st, evs[-1][1], end)
             else:
                 evs.append((st, start, end))
     return evs
 
 
-def write_ics(cal):
+def ics_text(cal):
     utc = lambda t: t.astimezone(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     lines = [
         "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//outage-bot//UA",
@@ -340,8 +379,7 @@ def write_ics(cal):
         lines += [
             "BEGIN:VEVENT",
             f"UID:{utc(a)}-{utc(b)}-{st}-{GROUP}@outage-bot",
-            f"DTSTAMP:{utc(a)}",
-            f"DTSTART:{utc(a)}", f"DTEND:{utc(b)}",
+            f"DTSTAMP:{utc(a)}", f"DTSTART:{utc(a)}", f"DTEND:{utc(b)}",
             f"SUMMARY:{'🔴 Без світла' if off else '🟡 Можливе відключення'}",
             f"DESCRIPTION:Черга {Q} · графік ДТЕК",
             "TRANSP:OPAQUE" if off else "TRANSP:TRANSPARENT",
@@ -351,146 +389,118 @@ def write_ics(cal):
                       "TRIGGER:-PT30M", "END:VALARM"]
         lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
-    body = "\r\n".join(lines) + "\r\n"
-    try:
-        with open(ICS_FILE, encoding="utf-8", newline="") as f:
-            if f.read() == body:
-                return
-    except FileNotFoundError:
-        pass
-    with open(ICS_FILE, "w", encoding="utf-8", newline="") as f:
-        f.write(body)
+    return "\r\n".join(lines) + "\r\n"
 
 
-# ---------- source health ----------
-def source_problem(src, now):
-    """None if the mirror is fresh, else a short reason."""
-    if src is None:
-        return "не вдалося завантажити дані"
-    st = src.get("lastUpdateStatus") or {}
+# ---------- files ----------
+def write_atomic(path, text, newline=None):
+    """Write via a temp file + rename, so a killed run never leaves a half-written file."""
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8", newline=newline) as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def load_state():
     try:
-        upd = dt.datetime.fromisoformat(src["lastUpdated"].replace("Z", "+00:00"))
-        age = (now - upd).total_seconds() / 60
-    except (KeyError, ValueError):
-        return "невідомий формат даних"
-    if age > STALE_MIN:
-        return f"дані не оновлювались {until(age)}"
-    if st.get("ok") is False:
-        return f"сайт ДТЕК не віддає графік (код {st.get('code')})"
-    return None
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_state(state):
+    write_atomic(STATE_FILE, json.dumps(state, ensure_ascii=False, indent=1))
+
 
 # ---------- main ----------
 def main():
     now = now_kyiv()
     today = now.date()
+    tomorrow = today + dt.timedelta(days=1)
+    state = load_state()
+    failed = []          # deliveries that didn't reach anyone (state not advanced -> retried)
+
+    ref = None if os.environ.get("SOURCE_FILE") else mirror_commit()
     try:
-        src = load_source()
-    except Exception as e:  # network / JSON errors: report via health check, don't crash
+        src = load_source(ref)
+    except Exception as e:
         print(f"::warning::source load failed: {e}")
         src = None
+    days = group_days(src, today) if src else {}
 
-    try:
-        with open(STATE_FILE, encoding="utf-8") as f:
-            state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
-
-    # 0) source health: alert once if broken for 1h+, and once when it recovers
-    problem = source_problem(src, now)
+    # 0) health: alert once if broken for ALERT_AFTER_MIN+, once more when it recovers
+    problem = source_problem(src, days, now)
     health = state.get("health", {})
     if problem:
-        since = health.get("since") or now.isoformat(timespec="minutes")
-        health["since"] = since
-        age = (now - dt.datetime.fromisoformat(since)).total_seconds() / 60
-        if age >= 60 and not health.get("alerted"):
-            send(f"⚠️ <b>Бот не бачить актуального графіка</b>\n{problem}.\n"
-                 f"Поки не відновиться, звіряйся з dtek-krem.com.ua\n<i>Черга {Q}</i>", now)
-            health["alerted"] = True
+        health.setdefault("since", now.isoformat(timespec="minutes"))
+        age = (now - dt.datetime.fromisoformat(health["since"])).total_seconds() / 60
+        if age >= ALERT_AFTER_MIN and not health.get("alerted"):
+            if send(f"⚠️ <b>Бот не бачить актуального графіка</b>\n{html.escape(problem)}.\n"
+                    f"Поки не відновиться, звіряйся з dtek-krem.com.ua\n<i>Черга {Q}</i>", now):
+                health["alerted"] = True
+            else:
+                failed.append("health")
+    elif health.get("alerted"):
+        if send(f"✅ <b>Дані про графік знову надходять</b>\n<i>Черга {Q}</i>", now):
+            health = {}
+        else:
+            failed.append("health")
     else:
-        if health.get("alerted"):
-            send(f"✅ <b>Дані про графік знову надходять</b>\n<i>Черга {Q}</i>", now)
         health = {}
     state["health"] = health
-    if src is None:
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=1)
-        return
 
-    fact = src.get("fact") or {}
-    days = {}
-    for ts, groups in (fact.get("data") or {}).items():
-        d = dt.datetime.fromtimestamp(int(ts), KYIV).date()
-        if d >= today and GROUP in groups:
-            days[d] = half_hours(groups[GROUP])
-    if not days:
-        print(f"No data for {GROUP}; skipping.")
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=1)
-        return
+    if days:
+        sent = state.get("days", {})                 # iso date -> {"hash", "off"}
+        reminded = set(state.get("reminded", []))
 
-    sent = state.get("days", {})          # iso date -> {"hash", "off"}
-    reminded = set(state.get("reminded", []))
-    h = lambda s: hashlib.sha1("".join(s).encode()).hexdigest()[:12]
+        # 1) schedule message on change (manual "Run workflow" always sends)
+        changed = [d for d, s in days.items() if sent.get(d.isoformat(), {}).get("hash") != schedule_hash(s)]
+        force = os.environ.get("FORCE") or os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        if changed or force:
+            text = schedule_text(days, today, changed, sent, (src.get("fact") or {}).get("update", "—"))
+            if send(text, now, photo=fetch_image(ref)):
+                for d in changed:
+                    sent[d.isoformat()] = {"hash": schedule_hash(days[d]), "off": off_list(days[d])}
+            else:
+                failed.append("schedule")
 
-    tomorrow = today + dt.timedelta(days=1)
-    t_today = days.get(today, ["on"] * 48)
-    t_tom = days.get(tomorrow)
+        # 2) reminders
+        if REMIND_MIN:
+            for key, text in reminders_due(days.get(today, ["on"] * 48), days.get(tomorrow), now, reminded):
+                if send(text, now):
+                    reminded.add(key)
+                else:
+                    failed.append("reminder")
 
-    # 1) schedule message on change
-    changed = [d for d, s in days.items() if sent.get(d.isoformat(), {}).get("hash") != h(s)]
-    # manual "Run workflow" in GitHub always sends the current schedule
-    force = os.environ.get("FORCE") or os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-    if changed or force:
-        first = not sent
-        fresh = [d for d in changed if d.isoformat() not in sent]   # newly published days
-        news = title(days, today, changed, fresh, sent, first)
-        parts = [news] if news else []
-        for d in sorted(days):                       # chronological: today, then tomorrow
-            prev = None if first else sent.get(d.isoformat(), {}).get("off")
-            parts.append(day_block(d, days[d], today, prev, is_new=(d in fresh and not first)))
-        parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {fact.get('update', '—')}</i>")
-        text = "\n\n".join(parts)
-        # caption limit is 1024 visible chars; long texts go without the picture
-        visible = len(text) - sum(len(t) for t in ("<b>", "</b>", "<i>", "</i>", "<pre>", "</pre>") for _ in range(text.count(t)))
-        send(text, now, photo=fetch_image() if visible <= 1000 else None)
-        for d in changed:
-            sent[d.isoformat()] = {"hash": h(days[d]), "off": off_list(days[d])}
+        # 3) calendar: current days + last ICS_KEEP_DAYS of history
+        enc = {"on": "o", "off": "x", "maybe": "?"}
+        cal = state.get("cal", {})
+        cal.update({d.isoformat(): "".join(enc[x] for x in s) for d, s in days.items()})
+        cutoff = (today - dt.timedelta(days=ICS_KEEP_DAYS)).isoformat()
+        cal = {k: v for k, v in cal.items() if k >= cutoff}
+        dec = {v: k for k, v in enc.items()}
+        body = ics_text({k: [dec[c] for c in v] for k, v in cal.items()})
+        try:
+            with open(ICS_FILE, encoding="utf-8", newline="") as f:
+                unchanged = f.read() == body
+        except FileNotFoundError:
+            unchanged = False
+        if not unchanged:
+            write_atomic(ICS_FILE, body, newline="")
 
-    # 2) reminders before each outage (today + overnight into tomorrow)
-    if REMIND_MIN:
-        line = t_today + (t_tom or ["on"] * 48)
-        mins_now = now.hour * 60 + now.minute
-        for s, a, b in runs(line):
-            if s != "off" or a == 0:
-                continue
-            lead = a * 30 - mins_now
-            key = f"{(today if a < 48 else tomorrow).isoformat()}@{hm(a, True)}"
-            if 0 < lead <= REMIND_MIN and key not in reminded:
-                end = f"{hm(b)}{' завтра' if b > 48 else ''}"
-                msg = (f"⏰ <b>О {hm(a, True)} вимкнуть світло</b> · через {until(lead)}\n"
-                       f"До {end} · {dur(b - a)} без світла")
-                send(msg, now)
-                reminded.add(key)
+        keep = {d.isoformat() for d in days}
+        state.update({
+            "days": {k: v for k, v in sent.items() if k in keep},
+            "reminded": sorted(k for k in reminded if k[:10] >= today.isoformat()),
+            "cal": cal,
+        })
+        print("changed:", [d.isoformat() for d in changed])
 
-    # keep state small: only today and later
-    # 3) calendar feed: current days + last 2 weeks of history
-    cal = state.get("cal", {})
-    cal.update({d.isoformat(): "".join("ox?"[["on", "off", "maybe"].index(x)] for x in s)
-                for d, s in days.items()})
-    cutoff = (today - dt.timedelta(days=ICS_KEEP_DAYS)).isoformat()
-    cal = {k: v for k, v in cal.items() if k >= cutoff}
-    write_ics({k: [{"o": "on", "x": "off", "?": "maybe"}[c] for c in v] for k, v in cal.items()})
-
-    keep = {d.isoformat() for d in days}
-    state = {
-        "days": {k: v for k, v in sent.items() if k in keep},
-        "reminded": sorted(k for k in reminded if k[:10] >= today.isoformat()),
-        "cal": cal,
-        "health": state.get("health", {}),
-    }
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, ensure_ascii=False, indent=1)
-    print("changed:", [d.isoformat() for d in changed])
+    save_state(state)
+    if failed:
+        # state is saved first, so what did go out is not resent; the red run makes GitHub email you
+        sys.exit(f"Telegram: not delivered: {', '.join(failed)}")
 
 
 if __name__ == "__main__":
