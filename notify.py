@@ -105,21 +105,6 @@ def runs(states):
     return res
 
 
-TL_CHAR = {("on", "on"): "·", ("off", "off"): "━", ("off", "on"): "╸", ("on", "off"): "╺"}
-
-
-def timeline(days, today):
-    """Monospace day bars under an hour ruler, 1 char = 1 hour (Gantt-style strokes,
-    not filled blocks: in dark theme a white block would read as "light"):
-    · power   ━ outage   ╸ outage 1st half   ╺ outage 2nd half   ┅ possible"""
-    rows = ["   0     6     12    18    24"]
-    for d in sorted(days):
-        st = days[d]
-        bar = "".join(TL_CHAR.get((st[2 * h], st[2 * h + 1]), "┅") for h in range(24))
-        rows.append(f"{DAYS_UA[d.weekday()]} {bar}")
-    return "\n".join(f"<code>{r}</code>" for r in rows)
-
-
 def off_list(states):
     return [[a, b] for s, a, b in runs(states) if s == "off"]
 
@@ -455,7 +440,7 @@ def main():
             top += lines
             if kind == "summary" and not any(x == "maybe" for x in days[d]):
                 covered.add(d)          # headline already lists this day's times
-        parts = ["\n".join(top), timeline(days, today)]
+        parts = ["\n".join(top)]   # the picture is the visual; text = answer + exact times
         rest = [day_line(d, days[d], today) for d in sorted(days) if d not in covered]
         if rest:
             parts.append("\n".join(rest))
