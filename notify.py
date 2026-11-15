@@ -105,18 +105,19 @@ def runs(states):
     return res
 
 
-TL_CHAR = {("on", "on"): "·", ("off", "off"): "█", ("off", "on"): "▌", ("on", "off"): "▐"}
+TL_CHAR = {("on", "on"): "·", ("off", "off"): "━", ("off", "on"): "╸", ("on", "off"): "╺"}
 
 
 def timeline(days, today):
-    """Monospace day bars under an hour ruler, 1 char = 1 hour:
-    · power   █ outage   ▌ outage 1st half   ▐ outage 2nd half   ░ possible"""
+    """Monospace day bars under an hour ruler, 1 char = 1 hour (Gantt-style strokes,
+    not filled blocks: in dark theme a white block would read as "light"):
+    · power   ━ outage   ╸ outage 1st half   ╺ outage 2nd half   ┅ possible"""
     rows = ["   0     6     12    18    24"]
     for d in sorted(days):
         st = days[d]
-        bar = "".join(TL_CHAR.get((st[2 * h], st[2 * h + 1]), "░") for h in range(24))
+        bar = "".join(TL_CHAR.get((st[2 * h], st[2 * h + 1]), "┅") for h in range(24))
         rows.append(f"{DAYS_UA[d.weekday()]} {bar}")
-    return "<pre>" + "\n".join(rows) + "</pre>"
+    return "\n".join(f"<code>{r}</code>" for r in rows)
 
 
 def off_list(states):
@@ -145,7 +146,7 @@ def day_label(date, today):
     return "Сьогодні" if date == today else "Завтра" if date == today + dt.timedelta(days=1) else f"{date:%d.%m}"
 
 
-def headline(date, states, today, prev_off, is_new, first):
+def headline(date, states, today, prev_off, is_new, first, was_changed=True):
     """Top 2 lines = what a lock-screen preview shows. Must answer the question alone."""
     offs = off_list(states)
     total = sum(b - a for a, b in offs)
@@ -161,7 +162,7 @@ def headline(date, states, today, prev_off, is_new, first):
         if old - new:
             out.append(f"🟢 Скасували: {span_list(old - new)}")
         return out, "change"
-    if prev_off is not None and prev_off == offs and not is_new and not first:
+    if was_changed and prev_off is not None and prev_off == offs and not is_new and not first:
         maybe = ", ".join(f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe")
         return [f"🟡 <b>{lbl}: оновлено можливі відключення</b>", f"🟡 {maybe or 'немає'}"], "maybe"
     icon = "🆕" if is_new and not first else "⚡"
@@ -195,10 +196,64 @@ def fetch_image():
         req = urllib.request.Request(IMG, headers={"User-Agent": "outage-bot"})
         with urllib.request.urlopen(req, timeout=30) as r:
             data = r.read()
-        return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+        if data[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
     except Exception as e:
         print(f"::warning::image not loaded: {e}")
         return None
+    return crop_image(data)
+
+
+def crop_image(png):
+    """Drop the weekly "possible outages" table (noise once DTEK publishes day-ahead
+    schedules). Layout: title, day table, [gap] weekly table, [gap] legend.
+    Any surprise in the layout -> send the original image."""
+    try:
+        try:
+            from PIL import Image
+        except ImportError:
+            if not os.environ.get("GITHUB_ACTIONS"):
+                return png
+            import subprocess
+            subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--user",
+                            "--break-system-packages", "pillow"], check=True, timeout=120)
+            import site, importlib
+            sys.path.append(site.getusersitepackages())
+            importlib.invalidate_caches()
+            from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(png)).convert("RGB")
+        w, hgt = im.size
+        px = im.load()
+        bg = px[5, 5]
+        empty = [all(px[x, y] == bg for x in range(0, w, 3)) for y in range(hgt)]
+        gaps, y = [], 0
+        while y < hgt:
+            if empty[y]:
+                s0 = y
+                while y < hgt and empty[y]:
+                    y += 1
+                if y - s0 >= 20:
+                    gaps.append((s0, y))
+            else:
+                y += 1
+        # inner gaps (not the top/bottom margins) that separate big blocks
+        inner = [g for g in gaps if g[0] > 0 and g[1] < hgt and g[1] - g[0] >= 30]
+        if len(inner) < 2:
+            return png
+        cut = inner[0][0] + (inner[0][1] - inner[0][0]) // 2      # after the day table
+        legend = inner[-1][0] + (inner[-1][1] - inner[-1][0]) // 2  # before the legend
+        if not (0.15 * hgt < cut < legend < hgt):
+            return png
+        out = Image.new("RGB", (w, cut + hgt - legend), bg)
+        out.paste(im.crop((0, 0, w, cut)), (0, 0))
+        out.paste(im.crop((0, legend, w, hgt)), (0, cut))
+        buf = io.BytesIO()
+        out.save(buf, "PNG", optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"::warning::crop failed, sending full image: {e}")
+        return png
 
 
 def tg(method, fields, file=None):
@@ -396,7 +451,7 @@ def main():
         top, covered = [], set()
         for d in focus:
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
-            lines, kind = headline(d, days[d], today, prev, d in fresh, first)
+            lines, kind = headline(d, days[d], today, prev, d in fresh, first, d in changed)
             top += lines
             if kind == "summary" and not any(x == "maybe" for x in days[d]):
                 covered.add(d)          # headline already lists this day's times

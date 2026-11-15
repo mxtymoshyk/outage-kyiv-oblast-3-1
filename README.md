@@ -29,4 +29,4 @@ Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirro
 | `QUIET` | `23-7` | Hours when messages arrive without sound (empty = always with sound) |
 
 ## Legend
-Timeline: `·` power · `█` no power · `▌` / `▐` no power in the first / second half of the hour · `░` possible outage. ✏️ day changed · 🆕 new day
+Timeline: `·` power · `━` no power · `╸` / `╺` no power in the first / second half of the hour · `┅` possible outage. ✏️ day changed · 🆕 new day. The weekly forecast is cropped out of the image.
