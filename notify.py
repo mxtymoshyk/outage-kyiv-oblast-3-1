@@ -34,6 +34,9 @@ REGION = os.environ.get("REGION", "kyiv-region")
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 REMIND_MIN = int(os.environ.get("REMIND_MIN", "60") or 0)
 QUIET = os.environ.get("QUIET", "23-7")
+STALE_MIN = int(os.environ.get("STALE_MIN", "180"))   # source older than this = broken
+ICS_FILE = os.environ.get("ICS_FILE", "outage.ics")
+ICS_KEEP_DAYS = 14
 SRC = f"https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main/data/{REGION}.json"
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 Q = GROUP.replace("GPV", "")
@@ -199,16 +202,118 @@ def send(text, now):
             ok += 1
         else:
             # one bad id must not block the others (or cause resends to them)
-            print(f"::warning::Chat {cid} not delivered: {body.get('description')}")
+            print(f"::warning::Chat …{cid[-3:]} not delivered: {body.get('description')}")  # repo is public: never log full ids
     if not ok:
         sys.exit("Telegram: message not delivered to any chat")
 
+
+
+# ---------- calendar feed (.ics) ----------
+def ics_events(cal):
+    """cal: {iso_date: states48} -> merged events across midnight [(state, start_dt, end_dt)]."""
+    evs = []
+    for iso in sorted(cal):
+        base = dt.datetime.combine(dt.date.fromisoformat(iso), dt.time(), KYIV)
+        for st, a, b in runs(cal[iso]):
+            if st == "on":
+                continue
+            start, end = base + dt.timedelta(minutes=30 * a), base + dt.timedelta(minutes=30 * b)
+            if evs and evs[-1][0] == st and evs[-1][2] == start:   # glue 23:00-24:00 + 00:00-03:00
+                evs[-1] = (st, evs[-1][1], end)
+            else:
+                evs.append((st, start, end))
+    return evs
+
+
+def write_ics(cal):
+    utc = lambda t: t.astimezone(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    lines = [
+        "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//outage-bot//UA",
+        "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+        f"X-WR-CALNAME:Світло · черга {Q}", "X-WR-TIMEZONE:Europe/Kyiv",
+        "REFRESH-INTERVAL;VALUE=DURATION:PT15M", "X-PUBLISHED-TTL:PT15M",
+    ]
+    for st, a, b in ics_events(cal):
+        off = st == "off"
+        lines += [
+            "BEGIN:VEVENT",
+            f"UID:{utc(a)}-{utc(b)}-{st}-{GROUP}@outage-bot",
+            f"DTSTAMP:{utc(a)}",
+            f"DTSTART:{utc(a)}", f"DTEND:{utc(b)}",
+            f"SUMMARY:{'🔴 Без світла' if off else '🟡 Можливе відключення'}",
+            f"DESCRIPTION:Черга {Q} · графік ДТЕК",
+            "TRANSP:OPAQUE" if off else "TRANSP:TRANSPARENT",
+        ]
+        if off:
+            lines += ["BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Скоро вимкнуть світло",
+                      "TRIGGER:-PT30M", "END:VALARM"]
+        lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+    body = "\r\n".join(lines) + "\r\n"
+    try:
+        with open(ICS_FILE, encoding="utf-8", newline="") as f:
+            if f.read() == body:
+                return
+    except FileNotFoundError:
+        pass
+    with open(ICS_FILE, "w", encoding="utf-8", newline="") as f:
+        f.write(body)
+
+
+# ---------- source health ----------
+def source_problem(src, now):
+    """None if the mirror is fresh, else a short reason."""
+    if src is None:
+        return "не вдалося завантажити дані"
+    st = src.get("lastUpdateStatus") or {}
+    try:
+        upd = dt.datetime.fromisoformat(src["lastUpdated"].replace("Z", "+00:00"))
+        age = (now - upd).total_seconds() / 60
+    except (KeyError, ValueError):
+        return "невідомий формат даних"
+    if age > STALE_MIN:
+        return f"дані не оновлювались {until(age)}"
+    if st.get("ok") is False:
+        return f"сайт ДТЕК не віддає графік (код {st.get('code')})"
+    return None
 
 # ---------- main ----------
 def main():
     now = now_kyiv()
     today = now.date()
-    src = load_source()
+    try:
+        src = load_source()
+    except Exception as e:  # network / JSON errors: report via health check, don't crash
+        print(f"::warning::source load failed: {e}")
+        src = None
+
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            state = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+
+    # 0) source health: alert once if broken for 1h+, and once when it recovers
+    problem = source_problem(src, now)
+    health = state.get("health", {})
+    if problem:
+        since = health.get("since") or now.isoformat(timespec="minutes")
+        health["since"] = since
+        age = (now - dt.datetime.fromisoformat(since)).total_seconds() / 60
+        if age >= 60 and not health.get("alerted"):
+            send(f"⚠️ <b>Бот не бачить актуального графіка</b>\n{problem}.\n"
+                 f"Поки не відновиться, звіряйся з dtek-krem.com.ua\n<i>Черга {Q}</i>", now)
+            health["alerted"] = True
+    else:
+        if health.get("alerted"):
+            send(f"✅ <b>Дані про графік знову надходять</b>\n<i>Черга {Q}</i>", now)
+        health = {}
+    state["health"] = health
+    if src is None:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
+        return
+
     fact = src.get("fact") or {}
     days = {}
     for ts, groups in (fact.get("data") or {}).items():
@@ -217,13 +322,10 @@ def main():
             days[d] = half_hours(groups[GROUP])
     if not days:
         print(f"No data for {GROUP}; skipping.")
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=1)
         return
 
-    try:
-        with open(STATE_FILE, encoding="utf-8") as f:
-            state = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        state = {}
     sent = state.get("days", {})          # iso date -> {"hash", "off"}
     reminded = set(state.get("reminded", []))
     h = lambda s: hashlib.sha1("".join(s).encode()).hexdigest()[:12]
@@ -269,10 +371,20 @@ def main():
                 reminded.add(key)
 
     # keep state small: only today and later
+    # 3) calendar feed: current days + last 2 weeks of history
+    cal = state.get("cal", {})
+    cal.update({d.isoformat(): "".join("ox?"[["on", "off", "maybe"].index(x)] for x in s)
+                for d, s in days.items()})
+    cutoff = (today - dt.timedelta(days=ICS_KEEP_DAYS)).isoformat()
+    cal = {k: v for k, v in cal.items() if k >= cutoff}
+    write_ics({k: [{"o": "on", "x": "off", "?": "maybe"}[c] for c in v] for k, v in cal.items()})
+
     keep = {d.isoformat() for d in days}
     state = {
         "days": {k: v for k, v in sent.items() if k in keep},
         "reminded": sorted(k for k in reminded if k[:10] >= today.isoformat()),
+        "cal": cal,
+        "health": state.get("health", {}),
     }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1)

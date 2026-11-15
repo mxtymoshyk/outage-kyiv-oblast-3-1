@@ -5,6 +5,13 @@ Checks the DTEK Kyiv-oblast schedule for queue 3.1 every 10 minutes and sends to
 - **Schedule**: when today's or tomorrow's schedule changes, or tomorrow's is published. Shows the current status, a 24-hour grid, the outage and power windows, and what changed (↩️ Було).
 - **Reminder** about 1 hour before each outage, including ones that run past midnight.
 - Messages between 23:00 and 07:00 arrive **silently** (no sound).
+- **Alert if the data source breaks** (no updates for 3+ hours, or DTEK's site blocks the parser) and a follow-up when it recovers. Silence never means "no changes" while the data is broken.
+- **Calendar** `outage.ics`: outages appear as events in iPhone/Mac Calendar, with an alarm 30 minutes before. History is kept for 2 weeks.
+
+## Calendar subscription
+URL: `webcal://raw.githubusercontent.com/mxtymoshyk/outage-kyiv-oblast-3-1/main/outage.ics`
+- **iPhone:** Settings → Apps → Calendar → Calendar Accounts → Add Account → Other → Add Subscribed Calendar → paste the URL → Next → turn **off** "Remove Alerts" → Save.
+- **Mac:** Calendar → File → New Calendar Subscription → URL → Location **iCloud** (it then shows up on iPhone too) → Auto-refresh: every 15 minutes → uncheck Alerts under Remove.
 
 Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirror of dtek-krem.com.ua that updates every few minutes.
 
