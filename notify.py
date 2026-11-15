@@ -144,18 +144,47 @@ def now_line(today, tomorrow, now):
     return f"🟢 <b>Зараз світло є</b> · вимкнуть о {when(nxt)}"
 
 
-def day_block(date, states, today_date, prev_off):
+def span_list(idx):
+    """sorted half-hour indices -> 'HH:MM–HH:MM, …'"""
+    out, idx = [], sorted(idx)
+    i = 0
+    while i < len(idx):
+        j = i
+        while j + 1 < len(idx) and idx[j + 1] == idx[j] + 1:
+            j += 1
+        out.append(f"{hm(idx[i])}–{hm(idx[j] + 1)}")
+        i = j + 1
+    return ", ".join(out)
+
+
+def diff_lines(prev_off, offs):
+    """What changed in plain words: extra outage time / returned power time."""
+    old = {i for a, b in prev_off for i in range(a, b)}
+    new = {i for a, b in offs for i in range(a, b)}
+    lines = []
+    if new - old:
+        lines.append(f"➕ Додали відключення: {span_list(new - old)} (+{dur(len(new - old))})")
+    if old - new:
+        lines.append(f"➖ Буде світло: {span_list(old - new)} (−{dur(len(old - new))})")
+    return lines
+
+
+def day_block(date, states, today_date, prev_off, is_new=False):
     label = "Сьогодні" if date == today_date else "Завтра" if date > today_date else str(date)
     offs = off_list(states)
     total = sum(b - a for a, b in offs)
     head = f"📅 <b>{label}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
     head += f" · без світла {dur(total)}" if total else ""
-    if prev_off is not None and prev_off != offs:
+    changed = prev_off is not None and prev_off != offs
+    if changed:
         head += " ✏️"
+    elif is_new:
+        head += " 🆕"
+    lines = [head] + (diff_lines(prev_off, offs) if changed else [])
     if not any(s != "on" for s in states):
-        return head + "\n🟢 Відключень не заплановано"
+        return "\n".join(lines + ["🟢 Відключень не заплановано"])
 
-    lines = [head, grid(states)]
+    lines.append(grid(states))
     for s, a, b in runs(states):
         if s == "off":
             lines.append(f"🔴 {hm(a)}–{hm(b)} · {dur(b - a)}")
@@ -164,9 +193,6 @@ def day_block(date, states, today_date, prev_off):
     on = [f"{hm(a)}–{hm(b)}" for s, a, b in runs(states) if s == "on"]
     if on:
         lines.append("🟢 Світло: " + ", ".join(on))
-    if prev_off is not None and prev_off != offs:
-        was = ", ".join(f"{hm(a)}–{hm(b)}" for a, b in prev_off) or "без відключень"
-        lines.append(f"↩️ Було: <s>{was}</s>")
     return "\n".join(lines)
 
 
@@ -340,12 +366,18 @@ def main():
     force = os.environ.get("FORCE") or os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
     if changed or force:
         first = not sent
-        title = "Оновлення графіка" if changed and not first else "Графік"
+        fresh = [d for d in changed if d.isoformat() not in sent]   # newly published days
+        if first or not changed:
+            title = "Графік"
+        elif fresh and len(fresh) == len(changed):
+            title = "Новий графік на завтра" if fresh == [tomorrow] else "Новий графік"
+        else:
+            title = "Графік змінився"
         parts = [f"⚡ <b>{title} · черга {Q}</b>",
                  now_line(t_today, t_tom, now)]
         for d in sorted(days):
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
-            parts.append(day_block(d, days[d], today, prev))
+            parts.append(day_block(d, days[d], today, prev, is_new=d in fresh and not first))
         upd = fact.get("update", "—")
         parts.append(f"<i>🟧 пів години без світла · 🟨 можливо\nДТЕК · оновлено {upd}</i>")
         send("\n\n".join(parts), now)
