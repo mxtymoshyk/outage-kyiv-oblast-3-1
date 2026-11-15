@@ -124,26 +124,6 @@ def off_list(states):
 
 
 # ---------- message parts ----------
-def now_line(today, tomorrow, now):
-    """Current status from today's schedule (+tomorrow for overnight)."""
-    line = today + (tomorrow or ["on"] * 48)
-    idx = now.hour * 2 + (1 if now.minute >= 30 else 0)
-    mins_now = now.hour * 60 + now.minute
-    cur = line[idx]
-    j = idx
-    while j < len(line) and line[j] == cur:
-        j += 1
-    when = lambda k: f"{hm(k, True)}{' завтра' if k >= 48 else ''} (через {until(k * 30 - mins_now)})"
-    if cur == "off":
-        return f"🔴 <b>Зараз без світла</b> · увімкнуть о {when(j)}"
-    if cur == "maybe":
-        return "🟡 <b>Зараз можливе відключення</b>"
-    nxt = next((k for k in range(idx, len(line)) if line[k] == "off"), None)
-    if nxt is None:
-        return "🟢 <b>Зараз світло є</b> · відключень далі не заплановано"
-    return f"🟢 <b>Зараз світло є</b> · вимкнуть о {when(nxt)}"
-
-
 def span_list(idx):
     """sorted half-hour indices -> 'HH:MM–HH:MM, …'"""
     out, idx = [], sorted(idx)
@@ -157,42 +137,51 @@ def span_list(idx):
     return ", ".join(out)
 
 
-def diff_lines(prev_off, offs):
-    """What changed in plain words: extra outage time / returned power time."""
-    old = {i for a, b in prev_off for i in range(a, b)}
-    new = {i for a, b in offs for i in range(a, b)}
-    lines = []
-    if new - old:
-        lines.append(f"➕ Додали відключення: {span_list(new - old)} (+{dur(len(new - old))})")
-    if old - new:
-        lines.append(f"➖ Буде світло: {span_list(old - new)} (−{dur(len(old - new))})")
-    return lines
+def ranges(offs):
+    return ", ".join(f"{hm(a)}–{hm(b)}" for a, b in offs)
 
 
-def day_block(date, states, today_date, prev_off, is_new=False):
-    label = "Сьогодні" if date == today_date else "Завтра" if date > today_date else str(date)
+def day_label(date, today):
+    return "Сьогодні" if date == today else "Завтра" if date == today + dt.timedelta(days=1) else f"{date:%d.%m}"
+
+
+def headline(date, states, today, prev_off, is_new, first):
+    """Top 2 lines = what a lock-screen preview shows. Must answer the question alone."""
     offs = off_list(states)
     total = sum(b - a for a, b in offs)
-    head = f"📅 <b>{label}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
-    head += f" · без світла {dur(total)}" if total else ""
-    changed = prev_off is not None and prev_off != offs
-    if changed:
-        head += " ✏️"
-    elif is_new:
-        head += " 🆕"
-    lines = [head] + (diff_lines(prev_off, offs) if changed else [])
-    if not any(s != "on" for s in states):
-        return "\n".join(lines + ["🟢 Відключень не заплановано"])
+    lbl = day_label(date, today)
+    if prev_off is not None and prev_off != offs and not first:
+        old = {i for a, b in prev_off for i in range(a, b)}
+        new = {i for a, b in offs for i in range(a, b)}
+        net = len(new) - len(old)
+        tail = f" · {'+' if net > 0 else '−'}{dur(abs(net))} без світла" if net else ""
+        out = [f"✏️ <b>{lbl} змінився графік</b>{tail}"]
+        if new - old:
+            out.append(f"🔴 Додали: {span_list(new - old)}")
+        if old - new:
+            out.append(f"🟢 Скасували: {span_list(old - new)}")
+        return out
+    if prev_off is not None and prev_off == offs and not is_new and not first:
+        maybe = ", ".join(f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe")
+        return [f"🟡 <b>{lbl}: оновлено можливі відключення</b>", f"🟡 {maybe or 'немає'}"]
+    icon = "🆕" if is_new and not first else "⚡"
+    if not total:
+        return [f"{icon} <b>{lbl} без відключень</b>"]
+    return [f"{icon} <b>{lbl} без світла {dur(total)}</b>", f"🔴 {ranges(offs)}"]
 
-    lines.append(grid(states))
-    for s, a, b in runs(states):
-        if s == "off":
-            lines.append(f"🔴 {hm(a)}–{hm(b)} · {dur(b - a)}")
-        elif s == "maybe":
-            lines.append(f"🟡 {hm(a)}–{hm(b)} · можливо")
-    on = [f"{hm(a)}–{hm(b)}" for s, a, b in runs(states) if s == "on"]
-    if on:
-        lines.append("🟢 Світло: " + ", ".join(on))
+
+def day_block(date, states, today):
+    offs = off_list(states)
+    total = sum(b - a for a, b in offs)
+    head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
+    if not any(x != "on" for x in states):
+        return head + "\n🟢 Відключень не заплановано"
+    lines = [head + (f" · {dur(total)} без світла" if total else ""), grid(states)]
+    if offs:
+        lines.append(f"🔴 {ranges(offs)}")
+    maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
+    if maybe:
+        lines.append(f"🟡 Можливо: {', '.join(maybe)}")
     return "\n".join(lines)
 
 
@@ -367,19 +356,18 @@ def main():
     if changed or force:
         first = not sent
         fresh = [d for d in changed if d.isoformat() not in sent]   # newly published days
-        if first or not changed:
-            title = "Графік"
-        elif fresh and len(fresh) == len(changed):
-            title = "Новий графік на завтра" if fresh == [tomorrow] else "Новий графік"
-        else:
-            title = "Графік змінився"
-        parts = [f"⚡ <b>{title} · черга {Q}</b>",
-                 now_line(t_today, t_tom, now)]
-        for d in sorted(days):
+        # headline: changed/new days first; on a manual run or first run, today's summary
+        real = [d for d in sorted(changed)
+                if d in fresh or sent.get(d.isoformat(), {}).get("off") != off_list(days[d])]
+        # a change in "maybe" slots alone doesn't deserve the headline if a real change exists
+        focus = (real or sorted(changed)) if changed and not first else [min(days)]
+        top = []
+        for d in focus:
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
-            parts.append(day_block(d, days[d], today, prev, is_new=d in fresh and not first))
-        upd = fact.get("update", "—")
-        parts.append(f"<i>🟧 пів години без світла · 🟨 можливо\nДТЕК · оновлено {upd}</i>")
+            top += headline(d, days[d], today, prev, d in fresh, first)
+        parts = ["\n".join(top)]
+        parts += [day_block(d, days[d], today) for d in sorted(days)]
+        parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {fact.get('update', '—')}</i>")
         send("\n\n".join(parts), now)
         for d in changed:
             sent[d.isoformat()] = {"hash": h(days[d]), "off": off_list(days[d])}
@@ -395,10 +383,8 @@ def main():
             key = f"{(today if a < 48 else tomorrow).isoformat()}@{hm(a, True)}"
             if 0 < lead <= REMIND_MIN and key not in reminded:
                 end = f"{hm(b)}{' завтра' if b > 48 else ''}"
-                msg = (f"⏰ <b>Через {until(lead)} вимкнуть світло</b>\n"
-                       f"🔴 {hm(a, True)}–{end} · {dur(b - a)} без світла\n"
-                       f"🔋 Час зарядити батарею й павербанки\n"
-                       f"<i>Черга {Q}</i>")
+                msg = (f"⏰ <b>О {hm(a, True)} вимкнуть світло</b> · через {until(lead)}\n"
+                       f"До {end} · {dur(b - a)} без світла")
                 send(msg, now)
                 reminded.add(key)
 
