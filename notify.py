@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from zoneinfo import ZoneInfo
@@ -180,16 +181,27 @@ def send(text, now):
     if not token or not chat:
         print(f"---- DRY RUN{' (silent)' if silent else ''} ----\n{text}\n")
         return
-    data = urllib.parse.urlencode({
-        "chat_id": chat, "text": text, "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
-        "disable_notification": "true" if silent else "false",
-    }).encode()
-    with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
-                                data=data, timeout=30) as r:
-        body = json.load(r)
-    if not body.get("ok"):
-        sys.exit(f"Telegram error: {body}")
+    # TG_CHAT_ID may hold several ids separated by commas: "123,456,-100789"
+    ok = 0
+    for cid in [c.strip() for c in chat.split(",") if c.strip()]:
+        data = urllib.parse.urlencode({
+            "chat_id": cid, "text": text, "parse_mode": "HTML",
+            "disable_web_page_preview": "true",
+            "disable_notification": "true" if silent else "false",
+        }).encode()
+        try:
+            with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
+                                        data=data, timeout=30) as r:
+                body = json.load(r)
+        except urllib.error.HTTPError as e:
+            body = {"ok": False, "description": e.read().decode(errors="replace")}
+        if body.get("ok"):
+            ok += 1
+        else:
+            # one bad id must not block the others (or cause resends to them)
+            print(f"::warning::Chat {cid} not delivered: {body.get('description')}")
+    if not ok:
+        sys.exit("Telegram: message not delivered to any chat")
 
 
 # ---------- main ----------
