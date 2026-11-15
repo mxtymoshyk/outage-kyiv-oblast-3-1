@@ -140,12 +140,15 @@ def headline(date, states, today, prev_off, is_new, first, was_changed=True):
         old = {i for a, b in prev_off for i in range(a, b)}
         new = {i for a, b in offs for i in range(a, b)}
         net = len(new) - len(old)
-        tail = f" · {'+' if net > 0 else '−'}{dur(abs(net))} без світла" if net else ""
+        if net:
+            tail = f" · без світла на {dur(abs(net))} {'більше' if net > 0 else 'менше'}"
+        else:
+            tail = " · час без світла той самий"
         out = [f"✏️ <b>{lbl} змінився графік</b>{tail}"]
         if new - old:
-            out.append(f"🔴 Додали: {span_list(new - old)}")
+            out.append(f"🔴 Тепер без світла: {span_list(new - old)}")
         if old - new:
-            out.append(f"🟢 Скасували: {span_list(old - new)}")
+            out.append(f"🟢 Тепер зі світлом: {span_list(old - new)}")
         return out, "change"
     if was_changed and prev_off is not None and prev_off == offs and not is_new and not first:
         maybe = ", ".join(f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe")
