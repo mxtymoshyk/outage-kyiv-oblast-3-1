@@ -4,7 +4,11 @@ on:
   schedule:
     - cron: "7,22,37,52 * * * *"
   workflow_dispatch:
-
+    inputs:
+      force:
+        description: "Надіслати графік, навіть якщо він не змінився"
+        type: boolean
+        default: true
 permissions:
   contents: write
 
@@ -26,6 +30,7 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           GROUP: GPV3.1
           REGION: kyiv-region
+          FORCE: ${{ inputs.force }}
         run: python3 notify.py
       - name: Save state
         if: always()
