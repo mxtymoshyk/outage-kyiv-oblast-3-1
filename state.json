@@ -1,6 +1,22 @@
 {
- "sent": {
-  "1794780000": "e14f5a8ec299dc02da3acbe82401a4bf3532b3aa"
+ "days": {
+  "2026-11-16": {
+   "hash": "dde79f785b1e",
+   "off": [
+    [
+     19,
+     32
+    ],
+    [
+     45,
+     48
+    ]
+   ]
+  }
  },
- "lastSent": "2026-11-16T00:44:47+02:00"
+ "reminded": [],
+ "cal": {
+  "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx"
+ },
+ "health": {}
 }
