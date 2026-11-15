@@ -37,9 +37,11 @@ QUIET = os.environ.get("QUIET", "23-7")
 STALE_MIN = int(os.environ.get("STALE_MIN", "180"))   # source older than this = broken
 ICS_FILE = os.environ.get("ICS_FILE", "outage.ics")
 ICS_KEEP_DAYS = 14
-SRC = f"https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main/data/{REGION}.json"
+BASE = "https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main"
+SRC = f"{BASE}/data/{REGION}.json"
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 Q = GROUP.replace("GPV", "")
+IMG = f"{BASE}/images/{REGION}/gpv-{Q.replace('.', '-')}.png"   # same table image Svitlobot posts
 
 # hour-slot value -> (first half, second half)
 SLOT = {
@@ -103,15 +105,18 @@ def runs(states):
     return res
 
 
-def grid(states):
-    """4 rows x 6 hours (night / morning / day / evening): 🟩 power · 🟥 outage in that hour · 🟨 possible.
-    An hour with any outage is red on purpose: the grid is for the overall picture,
-    exact half-hours are in the 🔴 line next to it."""
-    cells = []
-    for h in range(24):
-        pair = (states[2 * h], states[2 * h + 1])
-        cells.append("🟥" if "off" in pair else "🟨" if "maybe" in pair else "🟩")
-    return "\n".join(f"<code>{r:02d}</code> {''.join(cells[r:r + 6])}" for r in (0, 6, 12, 18))
+TL_CHAR = {("on", "on"): "·", ("off", "off"): "█", ("off", "on"): "▌", ("on", "off"): "▐"}
+
+
+def timeline(days, today):
+    """Monospace day bars under an hour ruler, 1 char = 1 hour:
+    · power   █ outage   ▌ outage 1st half   ▐ outage 2nd half   ░ possible"""
+    rows = ["   0     6     12    18    24"]
+    for d in sorted(days):
+        st = days[d]
+        bar = "".join(TL_CHAR.get((st[2 * h], st[2 * h + 1]), "░") for h in range(24))
+        rows.append(f"{DAYS_UA[d.weekday()]} {bar}")
+    return "<pre>" + "\n".join(rows) + "</pre>"
 
 
 def off_list(states):
@@ -166,19 +171,13 @@ def headline(date, states, today, prev_off, is_new, first):
     return [f"{icon} <b>{full}</b> · без світла {dur(total)}", f"🔴 {ranges(offs)}"], "summary"
 
 
-def day_block(date, states, today):
+def day_line(date, states, today):
     offs = off_list(states)
     total = sum(b - a for a, b in offs)
     head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
-    if not any(x != "on" for x in states):
-        return head + "\n🟢 Відключень не заплановано"
-    lines = [head + (f" · {dur(total)} без світла" if total else ""), grid(states)]
-    if offs:
-        lines.append(f"🔴 {ranges(offs)}")
+    line = f"{head} · без світла {dur(total)}\n🔴 {ranges(offs)}" if total else f"{head} · без відключень 🟢"
     maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
-    if maybe:
-        lines.append(f"🟡 Можливо: {', '.join(maybe)}")
-    return "\n".join(lines)
+    return line + (f"\n🟡 Можливо: {', '.join(maybe)}" if maybe else "")
 
 
 # ---------- telegram ----------
@@ -189,34 +188,71 @@ def is_quiet(now):
     return (now.hour >= a or now.hour < b) if a > b else (a <= now.hour < b)
 
 
-def send(text, now):
+def fetch_image():
+    if os.environ.get("NO_IMAGE"):
+        return None
+    try:
+        req = urllib.request.Request(IMG, headers={"User-Agent": "outage-bot"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = r.read()
+        return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+    except Exception as e:
+        print(f"::warning::image not loaded: {e}")
+        return None
+
+
+def tg(method, fields, file=None):
+    token = os.environ["TG_TOKEN"]
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    if file:  # multipart upload
+        boundary = "outagebot" + hashlib.sha1(file).hexdigest()[:16]
+        body = b""
+        for k, v in fields.items():
+            body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n").encode()
+        body += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"photo\"; filename=\"schedule.png\"\r\n"
+                 "Content-Type: image/png\r\n\r\n").encode() + file + f"\r\n--{boundary}--\r\n".encode()
+        req = urllib.request.Request(url, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    else:
+        req = urllib.request.Request(url, data=urllib.parse.urlencode(fields).encode())
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.load(r)
+    except urllib.error.HTTPError as e:
+        return {"ok": False, "description": e.read().decode(errors="replace")}
+
+
+def send(text, now, photo=None):
+    """Text message, or a photo with the text as caption (falls back to text on any photo error)."""
     silent = is_quiet(now)
     token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat:
-        print(f"---- DRY RUN{' (silent)' if silent else ''} ----\n{text}\n")
+        tag = f" + photo {len(photo) // 1024} KB" if photo else ""
+        print(f"---- DRY RUN{' (silent)' if silent else ''}{tag} ----\n{text}\n")
         return
-    # TG_CHAT_ID may hold several ids separated by commas: "123,456,-100789"
+    common = {"parse_mode": "HTML", "disable_notification": "true" if silent else "false"}
+    file_id = None
     ok = 0
+    # TG_CHAT_ID may hold several ids separated by commas: "123,456,-100789"
     for cid in [c.strip() for c in chat.split(",") if c.strip()]:
-        data = urllib.parse.urlencode({
-            "chat_id": cid, "text": text, "parse_mode": "HTML",
-            "disable_web_page_preview": "true",
-            "disable_notification": "true" if silent else "false",
-        }).encode()
-        try:
-            with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
-                                        data=data, timeout=30) as r:
-                body = json.load(r)
-        except urllib.error.HTTPError as e:
-            body = {"ok": False, "description": e.read().decode(errors="replace")}
+        body = {"ok": False}
+        if photo:
+            if file_id:
+                body = tg("sendPhoto", {**common, "chat_id": cid, "caption": text, "photo": file_id})
+            else:
+                body = tg("sendPhoto", {**common, "chat_id": cid, "caption": text}, file=photo)
+                if body.get("ok"):
+                    file_id = body["result"]["photo"][-1]["file_id"]
+            if not body.get("ok"):
+                print(f"::warning::photo to …{cid[-3:]} failed, sending text: {body.get('description')}")
+        if not body.get("ok"):
+            body = tg("sendMessage", {**common, "chat_id": cid, "text": text, "disable_web_page_preview": "true"})
         if body.get("ok"):
             ok += 1
         else:
-            # one bad id must not block the others (or cause resends to them)
-            print(f"::warning::Chat …{cid[-3:]} not delivered: {body.get('description')}")  # repo is public: never log full ids
+            # one bad id must not block the others (or cause resends to them); repo is public: never log full ids
+            print(f"::warning::Chat …{cid[-3:]} not delivered: {body.get('description')}")
     if not ok:
         sys.exit("Telegram: message not delivered to any chat")
-
 
 
 # ---------- calendar feed (.ics) ----------
@@ -357,25 +393,22 @@ def main():
                 if d in fresh or sent.get(d.isoformat(), {}).get("off") != off_list(days[d])]
         # a change in "maybe" slots alone doesn't deserve the headline if a real change exists
         focus = (real or sorted(changed)) if changed and not first else [min(days)]
-        top, folded = [], set()
+        top, covered = [], set()
         for d in focus:
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
             lines, kind = headline(d, days[d], today, prev, d in fresh, first)
             top += lines
-            # a summary headline already says everything but the picture:
-            # attach that day's grid right under it instead of repeating a full block
-            if kind == "summary" and len(focus) == 1 and any(x != "on" for x in days[d]):
-                top.append(grid(days[d]))
-                maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(days[d]) if x == "maybe"]
-                if maybe:
-                    top.append(f"🟡 Можливо: {', '.join(maybe)}")
-                folded.add(d)
-            elif kind == "summary" and not any(x != "on" for x in days[d]):
-                folded.add(d)
-        parts = ["\n".join(top)]
-        parts += [day_block(d, days[d], today) for d in sorted(days) if d not in folded]
+            if kind == "summary" and not any(x == "maybe" for x in days[d]):
+                covered.add(d)          # headline already lists this day's times
+        parts = ["\n".join(top), timeline(days, today)]
+        rest = [day_line(d, days[d], today) for d in sorted(days) if d not in covered]
+        if rest:
+            parts.append("\n".join(rest))
         parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {fact.get('update', '—')}</i>")
-        send("\n\n".join(parts), now)
+        text = "\n\n".join(parts)
+        # caption limit is 1024 visible chars; long texts go without the picture
+        visible = len(text) - sum(len(t) for t in ("<b>", "</b>", "<i>", "</i>", "<pre>", "</pre>") for _ in range(text.count(t)))
+        send(text, now, photo=fetch_image() if visible <= 1000 else None)
         for d in changed:
             sent[d.isoformat()] = {"hash": h(days[d]), "off": off_list(days[d])}
 

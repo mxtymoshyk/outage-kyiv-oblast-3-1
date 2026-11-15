@@ -2,7 +2,7 @@
 
 Checks the DTEK Kyiv-oblast schedule for queue 3.1 every 10 minutes and sends to Telegram:
 
-- **Schedule**: when today's or tomorrow's schedule changes, or tomorrow's is published. Shows the current status, a 24-hour grid, the outage and power windows, and what changed (↩️ Було).
+- **Schedule**: when today's or tomorrow's schedule changes, or tomorrow's is published. Sent as a photo (the same DTEK table image that Svitlobot posts) with a caption: what changed, a monospace timeline for the days, and exact times. If the image is unavailable, the text is sent without it.
 - **Reminder** about 1 hour before each outage, including ones that run past midnight.
 - Messages between 23:00 and 07:00 arrive **silently** (no sound).
 - **Alert if the data source breaks** (no updates for 3+ hours, or DTEK's site blocks the parser) and a follow-up when it recovers. Silence never means "no changes" while the data is broken.
@@ -29,4 +29,4 @@ Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirro
 | `QUIET` | `23-7` | Hours when messages arrive without sound (empty = always with sound) |
 
 ## Legend
-Grid: 4 rows of 6 hours (00, 06, 12, 18). 🟩 power · 🟥 an outage during that hour (exact times are in the 🔴 line) · 🟨 possible outage · ✏️ day changed · 🆕 new day
+Timeline: `·` power · `█` no power · `▌` / `▐` no power in the first / second half of the hour · `░` possible outage. ✏️ day changed · 🆕 new day
