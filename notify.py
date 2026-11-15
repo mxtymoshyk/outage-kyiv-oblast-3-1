@@ -131,44 +131,54 @@ def day_label(date, today):
     return "Сьогодні" if date == today else "Завтра" if date == today + dt.timedelta(days=1) else f"{date:%d.%m}"
 
 
-def headline(date, states, today, prev_off, is_new, first, was_changed=True):
-    """Top 2 lines = what a lock-screen preview shows. Must answer the question alone."""
+def day_block(date, states, today, prev_off=None, is_new=False):
+    """One self-contained block per day: header · total, times, and what changed."""
     offs = off_list(states)
     total = sum(b - a for a, b in offs)
-    lbl = day_label(date, today)
-    if prev_off is not None and prev_off != offs and not first:
+    edited = prev_off is not None and prev_off != offs
+    mark = " ✏️" if edited else " 🆕" if is_new else ""
+    head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>{mark}"
+    lines = [f"{head} · без світла {dur(total)}" if total else f"{head} · без відключень 🟢"]
+    if offs:
+        lines.append(f"🔴 {ranges(offs)}")
+    maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
+    if maybe:
+        lines.append(f"🟡 Можливо: {', '.join(maybe)}")
+    if edited:
         old = {i for a, b in prev_off for i in range(a, b)}
         new = {i for a, b in offs for i in range(a, b)}
-        net = len(new) - len(old)
-        if net:
-            tail = f" · без світла на {dur(abs(net))} {'більше' if net > 0 else 'менше'}"
-        else:
-            tail = " · час без світла той самий"
-        out = [f"✏️ <b>{lbl} змінився графік</b>{tail}"]
         if new - old:
-            out.append(f"🔴 Тепер без світла: {span_list(new - old)}")
+            lines.append(f"<i>↳ тепер без світла: {span_list(new - old)}</i>")
         if old - new:
-            out.append(f"🟢 Тепер зі світлом: {span_list(old - new)}")
-        return out, "change"
-    if was_changed and prev_off is not None and prev_off == offs and not is_new and not first:
-        maybe = ", ".join(f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe")
-        return [f"🟡 <b>{lbl}: оновлено можливі відключення</b>", f"🟡 {maybe or 'немає'}"], "maybe"
-    icon = "🆕" if is_new and not first else "⚡"
-    full = f"{lbl}, {DAYS_UA[date.weekday()]} {date:%d.%m}"
-    maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
-    tail = [f"🟡 Можливо: {', '.join(maybe)}"] if maybe else []
-    if not total:
-        return [f"{icon} <b>{full}</b> · без відключень 🟢"] + tail, "summary"
-    return [f"{icon} <b>{full}</b> · без світла {dur(total)}", f"🔴 {ranges(offs)}"] + tail, "summary"
+            lines.append(f"<i>↳ тепер зі світлом: {span_list(old - new)}</i>")
+    return "\n".join(lines)
 
 
-def day_line(date, states, today):
-    offs = off_list(states)
-    total = sum(b - a for a, b in offs)
-    head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
-    line = f"{head} · без світла {dur(total)}\n🔴 {ranges(offs)}" if total else f"{head} · без відключень 🟢"
-    maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
-    return line + (f"\n🟡 Можливо: {', '.join(maybe)}" if maybe else "")
+def title(days, today, changed, fresh, sent, first):
+    """First line(s) = the news, which is what a lock-screen preview shows."""
+    def total(d):
+        return sum(b - a for a, b in off_list(days[d]))
+
+    def word(d):
+        return {today: "сьогодні", today + dt.timedelta(days=1): "завтра"}.get(d, f"{d:%d.%m}")
+
+    def amount(d):
+        t = total(d)
+        return f"без світла {dur(t)}" if t else "без відключень"
+
+    if first or not changed:
+        return None        # no news: the day blocks themselves come first
+    news = []
+    for d in sorted(changed):
+        prev = sent.get(d.isoformat(), {}).get("off")
+        if d in fresh:
+            news.append(f"🆕 <b>Графік на {word(d)}</b> · {amount(d)}")
+        elif prev != off_list(days[d]):
+            net = total(d) - sum(b - a for a, b in prev)
+            delta = (f"без світла на {dur(abs(net))} {'більше' if net > 0 else 'менше'}"
+                     if net else "час без світла той самий")
+            news.append(f"✏️ <b>Змінився графік на {word(d)}</b> · {delta}")
+    return "\n".join(news) or "🟡 <b>Оновлено можливі відключення</b>"
 
 
 # ---------- telegram ----------
@@ -433,22 +443,11 @@ def main():
     if changed or force:
         first = not sent
         fresh = [d for d in changed if d.isoformat() not in sent]   # newly published days
-        # headline: changed/new days first; on a manual run or first run, today's summary
-        real = [d for d in sorted(changed)
-                if d in fresh or sent.get(d.isoformat(), {}).get("off") != off_list(days[d])]
-        # a change in "maybe" slots alone doesn't deserve the headline if a real change exists
-        focus = (real or sorted(changed)) if changed and not first else [min(days)]
-        top, covered = [], set()
-        for d in focus:
+        news = title(days, today, changed, fresh, sent, first)
+        parts = [news] if news else []
+        for d in sorted(days):                       # chronological: today, then tomorrow
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
-            lines, kind = headline(d, days[d], today, prev, d in fresh, first, d in changed)
-            top += lines
-            if kind == "summary":
-                covered.add(d)          # headline already lists this day's times
-        parts = ["\n".join(top)]   # the picture is the visual; text = answer + exact times
-        rest = [day_line(d, days[d], today) for d in sorted(days) if d not in covered]
-        if rest:
-            parts.append("\n".join(rest))
+            parts.append(day_block(d, days[d], today, prev, is_new=(d in fresh and not first)))
         parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {fact.get('update', '—')}</i>")
         text = "\n\n".join(parts)
         # caption limit is 1024 visible chars; long texts go without the picture
