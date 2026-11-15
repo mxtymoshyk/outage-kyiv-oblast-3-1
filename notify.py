@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 """DTEK Kyiv-oblast outage schedule -> Telegram.
 
-Sends a message only when the schedule for your group changes
-(or when tomorrow's schedule is published). Stdlib only.
+Two kinds of messages:
+  * schedule  - when today's/tomorrow's schedule for the group changes
+                (or tomorrow's is published); shows what changed
+  * reminder  - ~REMIND_MIN minutes before each planned outage
+Messages between QUIET hours are delivered silently. Stdlib only.
 
 Env:
-  TG_TOKEN    Telegram bot token from @BotFather   (empty = dry run, prints)
-  TG_CHAT_ID  chat / user / channel id to send to
-  GROUP       queue id, default GPV3.1
-  REGION      data file, default kyiv-region
-  STATE_FILE  default state.json
-  SOURCE_FILE optional local JSON instead of downloading (for tests)
+  TG_TOKEN, TG_CHAT_ID  Telegram bot token / chat id (empty = dry run)
+  GROUP        default GPV3.1
+  REGION       default kyiv-region
+  REMIND_MIN   reminder lead time in minutes, default 60 (0 = off)
+  QUIET        silent hours "23-7" (empty = never silent)
+  STATE_FILE   default state.json
+  SOURCE_FILE  local JSON instead of download (tests)
+  TEST_NOW     ISO datetime to pretend "now" (tests)
+  FORCE        send the schedule even if nothing changed
 """
 import datetime as dt
 import hashlib
@@ -25,19 +31,25 @@ KYIV = ZoneInfo("Europe/Kyiv")
 GROUP = os.environ.get("GROUP", "GPV3.1")
 REGION = os.environ.get("REGION", "kyiv-region")
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+REMIND_MIN = int(os.environ.get("REMIND_MIN", "60") or 0)
+QUIET = os.environ.get("QUIET", "23-7")
 SRC = f"https://raw.githubusercontent.com/Baskerville42/outage-data-ua/main/data/{REGION}.json"
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
+Q = GROUP.replace("GPV", "")
 
-# hour-slot value -> (first half, second half); "off" / "maybe" / "on"
+# hour-slot value -> (first half, second half)
 SLOT = {
-    "yes": ("on", "on"),
-    "no": ("off", "off"),
-    "first": ("off", "on"),
-    "second": ("on", "off"),
+    "yes": ("on", "on"), "no": ("off", "off"),
+    "first": ("off", "on"), "second": ("on", "off"),
     "maybe": ("maybe", "maybe"),
-    "mfirst": ("maybe", "on"),
-    "msecond": ("on", "maybe"),
+    "mfirst": ("maybe", "on"), "msecond": ("on", "maybe"),
 }
+
+
+# ---------- helpers ----------
+def now_kyiv():
+    t = os.environ.get("TEST_NOW")
+    return dt.datetime.fromisoformat(t).replace(tzinfo=KYIV) if t else dt.datetime.now(KYIV)
 
 
 def load_source():
@@ -50,81 +62,149 @@ def load_source():
 
 
 def half_hours(slots):
-    """24 hour slots -> 48 half-hour states."""
     out = []
     for h in range(1, 25):
         out.extend(SLOT.get(slots.get(str(h), "yes"), ("on", "on")))
     return out
 
 
-def fmt(i):
-    return "24:00" if i == 48 else f"{i // 2:02d}:{'30' if i % 2 else '00'}"
+def hm(i, start=False):
+    """Half-hour index -> HH:MM. Index 48 is 24:00 as an end, 00:00 (next day) as a start."""
+    if i > 48 or (start and i >= 48):
+        i -= 48
+    return f"{i // 2:02d}:{'30' if i % 2 else '00'}"
 
 
-def intervals(states):
-    """Merge consecutive half-hours of the same non-'on' state."""
+def dur(n_half):
+    h, half = divmod(n_half, 2)
+    if not h:
+        return "30 хв"
+    return f"{h},5 год" if half else f"{h} год"
+
+
+def until(minutes):
+    h, m = divmod(int(minutes), 60)
+    return f"{h} год {m} хв" if h and m else f"{h} год" if h else f"{m} хв"
+
+
+def runs(states):
+    """[(state, start, end)] for consecutive equal states."""
     res, i = [], 0
-    while i < 48:
-        s = states[i]
+    while i < len(states):
         j = i
-        while j < 48 and states[j] == s:
+        while j < len(states) and states[j] == states[i]:
             j += 1
-        if s != "on":
-            res.append((s, i, j))
+        res.append((states[i], i, j))
         i = j
     return res
 
 
-def day_block(ts, slots, today_ts):
-    d = dt.datetime.fromtimestamp(int(ts), KYIV).date()
-    label = "Сьогодні" if int(ts) == int(today_ts) else "Завтра" if int(ts) > int(today_ts) else "Вчора"
-    head = f"📅 <b>{label}, {DAYS_UA[d.weekday()]} {d:%d.%m}</b>"
-    ivs = intervals(half_hours(slots))
-    if not ivs:
+def grid(states):
+    """Two rows of 12 hours: 🟩 power · 🟥 none · 🟧 half-hour off · 🟨 possible."""
+    cells = []
+    for h in range(24):
+        a, b = states[2 * h], states[2 * h + 1]
+        if a == b == "off":
+            cells.append("🟥")
+        elif "off" in (a, b):
+            cells.append("🟧")
+        elif "maybe" in (a, b):
+            cells.append("🟨")
+        else:
+            cells.append("🟩")
+    return f"<code>00</code> {''.join(cells[:12])}\n<code>12</code> {''.join(cells[12:])}"
+
+
+def off_list(states):
+    return [[a, b] for s, a, b in runs(states) if s == "off"]
+
+
+# ---------- message parts ----------
+def now_line(today, tomorrow, now):
+    """Current status from today's schedule (+tomorrow for overnight)."""
+    line = today + (tomorrow or ["on"] * 48)
+    idx = now.hour * 2 + (1 if now.minute >= 30 else 0)
+    mins_now = now.hour * 60 + now.minute
+    cur = line[idx]
+    j = idx
+    while j < len(line) and line[j] == cur:
+        j += 1
+    when = lambda k: f"{hm(k, True)}{' завтра' if k >= 48 else ''} (через {until(k * 30 - mins_now)})"
+    if cur == "off":
+        return f"🔴 <b>Зараз без світла</b> · увімкнуть о {when(j)}"
+    if cur == "maybe":
+        return "🟡 <b>Зараз можливе відключення</b>"
+    nxt = next((k for k in range(idx, len(line)) if line[k] == "off"), None)
+    if nxt is None:
+        return "🟢 <b>Зараз світло є</b> · відключень далі не заплановано"
+    return f"🟢 <b>Зараз світло є</b> · вимкнуть о {when(nxt)}"
+
+
+def day_block(date, states, today_date, prev_off):
+    label = "Сьогодні" if date == today_date else "Завтра" if date > today_date else str(date)
+    offs = off_list(states)
+    total = sum(b - a for a, b in offs)
+    head = f"📅 <b>{label}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
+    head += f" · без світла {dur(total)}" if total else ""
+    if prev_off is not None and prev_off != offs:
+        head += " ✏️"
+    if not any(s != "on" for s in states):
         return head + "\n🟢 Відключень не заплановано"
-    lines = [head]
-    off_total = 0
-    for s, a, b in ivs:
-        icon = "🔴" if s == "off" else "🟡"
-        note = "" if s == "off" else "  <i>можливо</i>"
-        lines.append(f"{icon} {fmt(a)}–{fmt(b)}{note}")
+
+    lines = [head, grid(states)]
+    for s, a, b in runs(states):
         if s == "off":
-            off_total += b - a
-    if off_total:
-        h, m = divmod(off_total * 30, 60)
-        lines.append(f"⏱ Без світла: {h} год" + (f" {m} хв" if m else ""))
+            lines.append(f"🔴 {hm(a)}–{hm(b)} · {dur(b - a)}")
+        elif s == "maybe":
+            lines.append(f"🟡 {hm(a)}–{hm(b)} · можливо")
+    on = [f"{hm(a)}–{hm(b)}" for s, a, b in runs(states) if s == "on"]
+    if on:
+        lines.append("🟢 Світло: " + ", ".join(on))
+    if prev_off is not None and prev_off != offs:
+        was = ", ".join(f"{hm(a)}–{hm(b)}" for a, b in prev_off) or "без відключень"
+        lines.append(f"↩️ Було: <s>{was}</s>")
     return "\n".join(lines)
 
 
-def send(text):
+# ---------- telegram ----------
+def is_quiet(now):
+    if not QUIET:
+        return False
+    a, b = (int(x) for x in QUIET.split("-"))
+    return (now.hour >= a or now.hour < b) if a > b else (a <= now.hour < b)
+
+
+def send(text, now):
+    silent = is_quiet(now)
     token, chat = os.environ.get("TG_TOKEN"), os.environ.get("TG_CHAT_ID")
     if not token or not chat:
-        print("---- DRY RUN (no TG_TOKEN/TG_CHAT_ID) ----\n" + text)
+        print(f"---- DRY RUN{' (silent)' if silent else ''} ----\n{text}\n")
         return
     data = urllib.parse.urlencode({
         "chat_id": chat, "text": text, "parse_mode": "HTML",
         "disable_web_page_preview": "true",
+        "disable_notification": "true" if silent else "false",
     }).encode()
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    with urllib.request.urlopen(url, data=data, timeout=30) as r:
+    with urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage",
+                                data=data, timeout=30) as r:
         body = json.load(r)
     if not body.get("ok"):
         sys.exit(f"Telegram error: {body}")
 
 
+# ---------- main ----------
 def main():
+    now = now_kyiv()
+    today = now.date()
     src = load_source()
     fact = src.get("fact") or {}
-    days = fact.get("data") or {}
-    today_ts = int(fact.get("today", 0))
+    days = {}
+    for ts, groups in (fact.get("data") or {}).items():
+        d = dt.datetime.fromtimestamp(int(ts), KYIV).date()
+        if d >= today and GROUP in groups:
+            days[d] = half_hours(groups[GROUP])
     if not days:
-        print("No data in source; skipping.")
-        return
-
-    # Only today and future days for our group
-    mine = {ts: v[GROUP] for ts, v in days.items() if int(ts) >= today_ts and GROUP in v}
-    if not mine:
-        print(f"{GROUP} not found; skipping.")
+        print(f"No data for {GROUP}; skipping.")
         return
 
     try:
@@ -132,34 +212,56 @@ def main():
             state = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         state = {}
-    sent = state.get("sent", {})
+    sent = state.get("days", {})          # iso date -> {"hash", "off"}
+    reminded = set(state.get("reminded", []))
+    h = lambda s: hashlib.sha1("".join(s).encode()).hexdigest()[:12]
 
-    def h(slots):
-        return hashlib.sha1(json.dumps(slots, sort_keys=True).encode()).hexdigest()
+    tomorrow = today + dt.timedelta(days=1)
+    t_today = days.get(today, ["on"] * 48)
+    t_tom = days.get(tomorrow)
 
-    changed = [ts for ts, slots in mine.items() if sent.get(ts) != h(slots)]
-    if not changed and not os.environ.get("FORCE"):
-        print("No changes.")
-        return
+    # 1) schedule message on change
+    changed = [d for d, s in days.items() if sent.get(d.isoformat(), {}).get("hash") != h(s)]
+    if changed or os.environ.get("FORCE"):
+        first = not sent
+        parts = [f"⚡ <b>{'Графік' if first else 'Оновлення графіка'} · черга {Q}</b>",
+                 now_line(t_today, t_tom, now)]
+        for d in sorted(days):
+            prev = None if first else sent.get(d.isoformat(), {}).get("off")
+            parts.append(day_block(d, days[d], today, prev))
+        upd = fact.get("update", "—")
+        parts.append(f"<i>🟧 пів години без світла · 🟨 можливо\nДТЕК · оновлено {upd}</i>")
+        send("\n\n".join(parts), now)
+        for d in changed:
+            sent[d.isoformat()] = {"hash": h(days[d]), "off": off_list(days[d])}
 
-    first_run = not sent
-    title = "Графік відключень" if first_run else "Оновлення графіка"
-    q = GROUP.replace("GPV", "")
-    parts = [f"⚡ <b>{title} · черга {q}</b>"]
-    for ts in sorted(mine, key=int):
-        block = day_block(ts, mine[ts], today_ts)
-        if ts in changed and not first_run:
-            block = block.replace("</b>", "</b> ✏️", 1)
-        parts.append(block)
-    parts.append(f"<i>ДТЕК, оновлено {fact.get('update', '—')}</i>")
-    send("\n\n".join(parts))
+    # 2) reminders before each outage (today + overnight into tomorrow)
+    if REMIND_MIN:
+        line = t_today + (t_tom or ["on"] * 48)
+        mins_now = now.hour * 60 + now.minute
+        for s, a, b in runs(line):
+            if s != "off" or a == 0:
+                continue
+            lead = a * 30 - mins_now
+            key = f"{(today if a < 48 else tomorrow).isoformat()}@{hm(a, True)}"
+            if 0 < lead <= REMIND_MIN and key not in reminded:
+                end = f"{hm(b)}{' завтра' if b > 48 else ''}"
+                msg = (f"⏰ <b>Через {until(lead)} вимкнуть світло</b>\n"
+                       f"🔴 {hm(a, True)}–{end} · {dur(b - a)} без світла\n"
+                       f"🔋 Час зарядити батарею й павербанки\n"
+                       f"<i>Черга {Q}</i>")
+                send(msg, now)
+                reminded.add(key)
 
-    # keep only hashes for days still present (drops past days)
-    state["sent"] = {ts: h(slots) for ts, slots in mine.items()}
-    state["lastSent"] = dt.datetime.now(KYIV).isoformat(timespec="seconds")
+    # keep state small: only today and later
+    keep = {d.isoformat() for d in days}
+    state = {
+        "days": {k: v for k, v in sent.items() if k in keep},
+        "reminded": sorted(k for k in reminded if k[:10] >= today.isoformat()),
+    }
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=1)
-    print("Sent; days changed:", changed)
+    print("changed:", [d.isoformat() for d in changed])
 
 
 if __name__ == "__main__":
