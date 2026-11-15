@@ -29,4 +29,4 @@ Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirro
 | `QUIET` | `23-7` | Hours when messages arrive without sound (empty = always with sound) |
 
 ## Legend
-🟩 power · 🟥 no power · 🟧 out for half an hour · 🟨 possible outage · ✏️ day changed
+Grid: 4 rows of 6 hours (00, 06, 12, 18). 🟩 power · 🟥 an outage during that hour (exact times are in the 🔴 line) · 🟨 possible outage · ✏️ day changed · 🆕 new day

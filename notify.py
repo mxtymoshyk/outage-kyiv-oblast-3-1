@@ -104,19 +104,14 @@ def runs(states):
 
 
 def grid(states):
-    """Two rows of 12 hours: 🟩 power · 🟥 none · 🟧 half-hour off · 🟨 possible."""
+    """4 rows x 6 hours (night / morning / day / evening): 🟩 power · 🟥 outage in that hour · 🟨 possible.
+    An hour with any outage is red on purpose: the grid is for the overall picture,
+    exact half-hours are in the 🔴 line next to it."""
     cells = []
     for h in range(24):
-        a, b = states[2 * h], states[2 * h + 1]
-        if a == b == "off":
-            cells.append("🟥")
-        elif "off" in (a, b):
-            cells.append("🟧")
-        elif "maybe" in (a, b):
-            cells.append("🟨")
-        else:
-            cells.append("🟩")
-    return f"<code>00</code> {''.join(cells[:12])}\n<code>12</code> {''.join(cells[12:])}"
+        pair = (states[2 * h], states[2 * h + 1])
+        cells.append("🟥" if "off" in pair else "🟨" if "maybe" in pair else "🟩")
+    return "\n".join(f"<code>{r:02d}</code> {''.join(cells[r:r + 6])}" for r in (0, 6, 12, 18))
 
 
 def off_list(states):
