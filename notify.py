@@ -152,9 +152,11 @@ def headline(date, states, today, prev_off, is_new, first, was_changed=True):
         return [f"🟡 <b>{lbl}: оновлено можливі відключення</b>", f"🟡 {maybe or 'немає'}"], "maybe"
     icon = "🆕" if is_new and not first else "⚡"
     full = f"{lbl}, {DAYS_UA[date.weekday()]} {date:%d.%m}"
+    maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
+    tail = [f"🟡 Можливо: {', '.join(maybe)}"] if maybe else []
     if not total:
-        return [f"{icon} <b>{full}</b> · без відключень 🟢"], "summary"
-    return [f"{icon} <b>{full}</b> · без світла {dur(total)}", f"🔴 {ranges(offs)}"], "summary"
+        return [f"{icon} <b>{full}</b> · без відключень 🟢"] + tail, "summary"
+    return [f"{icon} <b>{full}</b> · без світла {dur(total)}", f"🔴 {ranges(offs)}"] + tail, "summary"
 
 
 def day_line(date, states, today):
@@ -438,7 +440,7 @@ def main():
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
             lines, kind = headline(d, days[d], today, prev, d in fresh, first, d in changed)
             top += lines
-            if kind == "summary" and not any(x == "maybe" for x in days[d]):
+            if kind == "summary":
                 covered.add(d)          # headline already lists this day's times
         parts = ["\n".join(top)]   # the picture is the visual; text = answer + exact times
         rest = [day_line(d, days[d], today) for d in sorted(days) if d not in covered]
