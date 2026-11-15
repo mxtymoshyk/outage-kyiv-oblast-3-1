@@ -105,6 +105,13 @@ class BotTest(unittest.TestCase):
         self.assertTrue(msgs[0].startswith("📅 <b>Сьогодні"))
         self.assertNotIn("можливі", msgs[0])
 
+    def test_external_trigger_with_force_false_stays_quiet(self):
+        self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
+        self.assertEqual(self.run_bot("2026-11-16T07:15", {TODAY: BASE_TODAY},
+                                      GITHUB_EVENT_NAME="workflow_dispatch", FORCE="false"), [])
+        self.assertEqual(len(self.run_bot("2026-11-16T07:30", {TODAY: BASE_TODAY},
+                                          GITHUB_EVENT_NAME="workflow_dispatch", FORCE="true")), 1)
+
     def test_new_tomorrow_news_on_top_days_in_order(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         msg, = self.run_bot("2026-11-16T20:10", {TODAY: BASE_TODAY, TOMORROW: BASE_TOMORROW})
@@ -184,6 +191,14 @@ class BotTest(unittest.TestCase):
         # 22:30 Kyiv (UTC+2) = 20:30Z, 03:00 next day = 01:00Z
         self.assertIn("DTSTART:20261116T203000Z\r\nDTEND:20261117T010000Z", ics)
         self.assertEqual(ics.count("BEGIN:VEVENT"), 3)
+
+
+class OwnPictureTest(unittest.TestCase):
+    @unittest.skipUnless(notify.import_pillow(), "Pillow not installed (only needed for the fallback)")
+    def test_own_drawing_is_a_png(self):
+        png = notify.render_image({TODAY: notify.half_hours(BASE_TODAY),
+                                   TOMORROW: notify.half_hours(BASE_TOMORROW)}, TODAY, "15.11.2026 20:28")
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
 
 
 if __name__ == "__main__":

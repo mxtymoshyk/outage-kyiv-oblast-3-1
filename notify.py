@@ -6,7 +6,8 @@ Messages:
                 is published: DTEK day-table picture + text (news, then each day)
   * reminder  - ~REMIND_MIN minutes before each planned outage
   * health    - once if the data source is broken for 1h+, once when it recovers
-Messages between QUIET hours are silent. Also writes outage.ics. Stdlib only.
+Messages between QUIET hours are silent. Also writes outage.ics. Stdlib only
+(Pillow is installed lazily just for the fallback picture).
 
 Data: github.com/Baskerville42/outage-data-ua. JSON and pictures are read from one
 commit, so the picture always matches the text.
@@ -161,18 +162,13 @@ def load_source(ref):
     return json.loads(http_get(raw_url(ref, f"data/{REGION}.json")))
 
 
-def fetch_image(ref):
-    """DTEK day-table picture from the same commit as the data; None if unavailable."""
-    if os.environ.get("NO_IMAGE") or os.environ.get("SOURCE_FILE"):
+def fetch_mirror_image(ref, name):
+    try:
+        data = http_get(raw_url(ref, f"images/{REGION}/{name}"))
+        return data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+    except Exception as e:
+        print(f"::warning::image {name} not loaded: {e}")
         return None
-    for name in IMG_NAMES:
-        try:
-            data = http_get(raw_url(ref, f"images/{REGION}/{name}"))
-            if data[:8] == b"\x89PNG\r\n\x1a\n":
-                return data
-        except Exception as e:
-            print(f"::warning::image {name} not loaded: {e}")
-    return None
 
 
 def group_days(src, today):
@@ -288,6 +284,108 @@ def reminders_due(t_today, t_tom, now, reminded):
             out.append((key, f"⏰ <b>О {hm(a, True)} вимкнуть світло</b> · через {until(lead)}\n"
                              f"До {end} · {dur(b - a)} без світла"))
     return out
+
+
+# ---------- own picture (fallback when the mirror has no day-table image) ----------
+FONT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+
+
+def import_pillow():
+    """Pillow is only needed for this rare fallback, so it's installed lazily in CI."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        if not os.environ.get("GITHUB_ACTIONS"):
+            return None
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", "--user",
+                        "--break-system-packages", "pillow"], check=True, timeout=180)
+        import importlib, site
+        sys.path.append(site.getusersitepackages())
+        importlib.invalidate_caches()
+        from PIL import Image, ImageDraw, ImageFont
+    return Image, ImageDraw, ImageFont
+
+
+def render_image(days, today, update_stamp):
+    """Mobile-first day bars drawn from the data itself: no dependency on mirror pictures."""
+    pil = import_pillow()
+    if not pil:
+        return None
+    Image, ImageDraw, ImageFont = pil
+    font = lambda size, bold=False: ImageFont.truetype(
+        os.path.join(FONT_DIR, f"IBMPlexSans-{'SemiBold' if bold else 'Regular'}.ttf"), size)
+    INK, MUTED, POWER, OUT, MAYBE, PILL = "#111827", "#6B7280", "#E5E7EB", "#111827", "#9CA3AF", "#FDE68A"
+    W, PAD, BAR_H, scale = 900, 40, 56, 2          # drawn at 2x for crisp text
+    row_h = 40 + BAR_H + 34 + 28
+    H = 130 + row_h * len(days) + 50
+    im = Image.new("RGB", (W * scale, H * scale), "white")
+    d = ImageDraw.Draw(im)
+    S = lambda *v: [x * scale for x in v]
+
+    d.text(S(PAD, 34), "Графік відключень", fill=INK, font=font(34 * scale, True))
+    pill = f"Черга {Q}"
+    pw = d.textlength(pill, font=font(26 * scale, True)) / scale + 32
+    d.rounded_rectangle(S(W - PAD - pw, 34, W - PAD, 78), radius=22 * scale, fill=PILL)
+    d.text(S(W - PAD - pw + 16, 39), pill, fill=INK, font=font(26 * scale, True))
+    d.text(S(PAD, 86), f"ДТЕК · оновлено {update_stamp}", fill=MUTED, font=font(20 * scale))
+
+    x0, x1 = PAD, W - PAD
+    seg = (x1 - x0) / 48
+    y = 136
+    for date in sorted(days):
+        states = days[date]
+        offs = off_list(states)
+        d.text(S(PAD, y), f"{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}",
+               fill=INK, font=font(26 * scale, True))
+        right = f"без світла {dur(total_off(offs))}" if offs else "без відключень"
+        rf = font(22 * scale)
+        d.text((x1 * scale - d.textlength(right, font=rf), (y + 4) * scale), right, fill=MUTED, font=rf)
+        by = y + 42
+        bar = Image.new("RGB", (int((x1 - x0) * scale), BAR_H * scale), POWER)
+        bd = ImageDraw.Draw(bar)
+        for st, a, b in runs(states):
+            if st != "on":
+                bd.rectangle([a * seg * scale, 0, b * seg * scale, BAR_H * scale], fill=OUT if st == "off" else MAYBE)
+        for hh in range(1, 24):                     # hour separators, stronger every 6h
+            x = hh * 2 * seg * scale
+            bd.line([x, 0, x, BAR_H * scale], fill="white", width=(3 if hh % 6 == 0 else 1) * scale)
+        mask = Image.new("L", bar.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, bar.size[0] - 1, bar.size[1] - 1], radius=12 * scale, fill=255)
+        im.paste(bar, (x0 * scale, by * scale), mask)
+        tf = font(18 * scale)
+        for hh in range(0, 25, 3):
+            lbl = f"{hh:02d}"
+            tx = (x0 + hh * 2 * seg) * scale - d.textlength(lbl, font=tf) / 2
+            d.text((tx, (by + BAR_H + 6) * scale), lbl, fill=MUTED, font=tf)
+        y += row_h
+
+    lx, ly = PAD, y + 4
+    for color, label in ((POWER, "Світло є"), (OUT, "Світла немає"), (MAYBE, "Можливо")):
+        d.rounded_rectangle(S(lx, ly + 3, lx + 22, ly + 25), radius=5 * scale, fill=color)
+        d.text(S(lx + 32, ly), label, fill=MUTED, font=font(20 * scale))
+        lx += 32 + d.textlength(label, font=font(20 * scale)) / scale + 36
+    im = im.resize((W, H), Image.LANCZOS)
+    import io
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=True)
+    return buf.getvalue()
+
+
+def picture(ref, days, today, update_stamp):
+    """Mirror's day table (same commit) -> own drawing -> mirror's full table -> no picture."""
+    if os.environ.get("NO_IMAGE") or os.environ.get("SOURCE_FILE"):
+        return None
+    png = fetch_mirror_image(ref, IMG_NAMES[0])
+    if png:
+        return png
+    try:
+        png = render_image(days, today, update_stamp)
+        if png:
+            print("::notice::mirror day image missing, sent own drawing")
+            return png
+    except Exception as e:
+        print(f"::warning::own drawing failed: {e}")
+    return fetch_mirror_image(ref, IMG_NAMES[1])
 
 
 # ---------- telegram ----------
@@ -456,10 +554,16 @@ def main():
 
         # 1) schedule message on change (manual "Run workflow" always sends)
         changed = [d for d, s in days.items() if sent.get(d.isoformat(), {}).get("hash") != schedule_hash(s)]
-        force = os.environ.get("FORCE") or os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        # FORCE comes from the workflow input: manual "Run workflow" -> true, external
+        # 15-min trigger -> false. Without FORCE, any manual dispatch forces (old workflow).
+        if "FORCE" in os.environ:
+            force = os.environ["FORCE"].lower() in ("1", "true")
+        else:
+            force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
         if changed or force:
-            text = schedule_text(days, today, changed, sent, (src.get("fact") or {}).get("update", "—"))
-            if send(text, now, photo=fetch_image(ref)):
+            stamp = (src.get("fact") or {}).get("update", "—")
+            text = schedule_text(days, today, changed, sent, stamp)
+            if send(text, now, photo=picture(ref, days, today, stamp)):
                 for d in changed:
                     sent[d.isoformat()] = {"hash": schedule_hash(days[d]), "off": off_list(days[d])}
             else:
