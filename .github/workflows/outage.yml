@@ -17,7 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+      - name: Tests
+        run: python3 -m unittest discover -s tests
       - name: Check schedule and notify
         env:
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
@@ -26,6 +28,7 @@ jobs:
           REGION: kyiv-region
         run: python3 notify.py
       - name: Save state
+        if: always()
         run: |
           git add state.json outage.ics
           if ! git diff --cached --quiet; then
