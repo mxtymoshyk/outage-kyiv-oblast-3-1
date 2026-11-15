@@ -234,9 +234,12 @@ def main():
 
     # 1) schedule message on change
     changed = [d for d, s in days.items() if sent.get(d.isoformat(), {}).get("hash") != h(s)]
-    if changed or os.environ.get("FORCE"):
+    # manual "Run workflow" in GitHub always sends the current schedule
+    force = os.environ.get("FORCE") or os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+    if changed or force:
         first = not sent
-        parts = [f"⚡ <b>{'Графік' if first else 'Оновлення графіка'} · черга {Q}</b>",
+        title = "Оновлення графіка" if changed and not first else "Графік"
+        parts = [f"⚡ <b>{title} · черга {Q}</b>",
                  now_line(t_today, t_tom, now)]
         for d in sorted(days):
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
