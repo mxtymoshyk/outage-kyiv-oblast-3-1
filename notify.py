@@ -160,14 +160,15 @@ def headline(date, states, today, prev_off, is_new, first):
             out.append(f"🔴 Додали: {span_list(new - old)}")
         if old - new:
             out.append(f"🟢 Скасували: {span_list(old - new)}")
-        return out
+        return out, "change"
     if prev_off is not None and prev_off == offs and not is_new and not first:
         maybe = ", ".join(f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe")
-        return [f"🟡 <b>{lbl}: оновлено можливі відключення</b>", f"🟡 {maybe or 'немає'}"]
+        return [f"🟡 <b>{lbl}: оновлено можливі відключення</b>", f"🟡 {maybe or 'немає'}"], "maybe"
     icon = "🆕" if is_new and not first else "⚡"
+    full = f"{lbl}, {DAYS_UA[date.weekday()]} {date:%d.%m}"
     if not total:
-        return [f"{icon} <b>{lbl} без відключень</b>"]
-    return [f"{icon} <b>{lbl} без світла {dur(total)}</b>", f"🔴 {ranges(offs)}"]
+        return [f"{icon} <b>{full}</b> · без відключень 🟢"], "summary"
+    return [f"{icon} <b>{full}</b> · без світла {dur(total)}", f"🔴 {ranges(offs)}"], "summary"
 
 
 def day_block(date, states, today):
@@ -361,12 +362,23 @@ def main():
                 if d in fresh or sent.get(d.isoformat(), {}).get("off") != off_list(days[d])]
         # a change in "maybe" slots alone doesn't deserve the headline if a real change exists
         focus = (real or sorted(changed)) if changed and not first else [min(days)]
-        top = []
+        top, folded = [], set()
         for d in focus:
             prev = None if first else sent.get(d.isoformat(), {}).get("off")
-            top += headline(d, days[d], today, prev, d in fresh, first)
+            lines, kind = headline(d, days[d], today, prev, d in fresh, first)
+            top += lines
+            # a summary headline already says everything but the picture:
+            # attach that day's grid right under it instead of repeating a full block
+            if kind == "summary" and len(focus) == 1 and any(x != "on" for x in days[d]):
+                top.append(grid(days[d]))
+                maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(days[d]) if x == "maybe"]
+                if maybe:
+                    top.append(f"🟡 Можливо: {', '.join(maybe)}")
+                folded.add(d)
+            elif kind == "summary" and not any(x != "on" for x in days[d]):
+                folded.add(d)
         parts = ["\n".join(top)]
-        parts += [day_block(d, days[d], today) for d in sorted(days)]
+        parts += [day_block(d, days[d], today) for d in sorted(days) if d not in folded]
         parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {fact.get('update', '—')}</i>")
         send("\n\n".join(parts), now)
         for d in changed:
