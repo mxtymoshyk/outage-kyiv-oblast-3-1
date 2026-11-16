@@ -12,6 +12,24 @@
      48
     ]
    ]
+  },
+  "2026-11-17": {
+   "hash": "419a3e69ec1b",
+   "off": [
+    [
+     0,
+     6
+    ],
+    [
+     18,
+     26
+    ],
+    [
+     42,
+     48
+    ]
+   ],
+   "s": "xxxxxxooooooooooooxxxxxxxxooooooooooooooooxxxxxx"
   }
  },
  "reminded": [
@@ -19,7 +37,8 @@
   "2026-11-16@23:00"
  ],
  "cal": {
-  "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx"
+  "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx",
+  "2026-11-17": "xxxxxxooooooooooooxxxxxxxxooooooooooooooooxxxxxx"
  },
  "health": {}
 }
