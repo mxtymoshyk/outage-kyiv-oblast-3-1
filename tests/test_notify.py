@@ -2,7 +2,9 @@
 
 Run: python3 -m unittest discover -s tests -v
 """
+import contextlib
 import datetime as dt
+import io
 import importlib.util
 import json
 import os
@@ -77,7 +79,10 @@ class BotTest(unittest.TestCase):
         with open(self.src_file, "w", encoding="utf-8") as f:
             json.dump(src, f)
         before = len(self.sent)
-        with mock.patch.dict(os.environ, {"TEST_NOW": at, **env}):
+        # swallow the bot's stdout: its "::notice::"/"::warning::" lines would show up in the
+        # Actions run as real annotations (e.g. a fake "mirror problem" from a test scenario)
+        with mock.patch.dict(os.environ, {"TEST_NOW": at, **env}), \
+                contextlib.redirect_stdout(io.StringIO()):
             try:
                 notify.main()
             except SystemExit:
