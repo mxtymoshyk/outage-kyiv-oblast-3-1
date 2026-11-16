@@ -324,9 +324,9 @@ def day_block(date, states, today, prev_off=None, is_new=False):
     (chronological), each change noted next to the outage it belongs to."""
     offs = off_list(states)
     total = total_off(offs)
+    # no ✏️/🆕 on the day itself: the news line names the day, the "· було …" notes show what changed
     edited = prev_off is not None and prev_off != offs
-    mark = " ✏️" if edited else " 🆕" if is_new else ""
-    head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>{mark}"
+    head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
     lines = [f"{head} · без світла {dur(total)}" if total else f"{head} · без відключень 🟢"]
     notes, cancelled = change_notes(prev_off, offs) if edited else ({}, [])
     rows = []

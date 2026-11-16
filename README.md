@@ -29,7 +29,7 @@ Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirro
 | `QUIET` | `23-7` | Hours when messages arrive without sound (empty = always with sound) |
 
 ## Legend
-Image: `gpv-3-1-emergency.png` from the same mirror commit as the data (day table + legend). If the mirror drops this image, the bot draws its own from the data (`fonts/`: IBM Plex Sans, OFL), and only after that falls back to the mirror's full table. ✏️ day changed · 🆕 new day
+Image: `gpv-3-1-emergency.png` from the same mirror commit as the data (day table + legend). If the mirror drops this image, the bot draws its own from the data (`fonts/`: IBM Plex Sans, OFL), and only after that falls back to the mirror's full table.
 
 ## Tests
 `python3 -m unittest discover -s tests -v`: the main scenarios (new day, change, possible outages only, manual run, reminders including past midnight, data-source alerts, failed delivery, calendar). They run in Actions before every check.

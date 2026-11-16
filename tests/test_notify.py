@@ -124,7 +124,7 @@ class BotTest(unittest.TestCase):
         msg, = self.run_bot("2026-11-16T20:10", {TODAY: BASE_TODAY, TOMORROW: BASE_TOMORROW})
         self.assertTrue(msg.startswith("🆕 <b>Графік на завтра</b> · без світла 7 год"))
         self.assertLess(msg.index("📅 <b>Сьогодні"), msg.index("📅 <b>Завтра"))
-        self.assertIn("📅 <b>Завтра, вт 17.11</b> 🆕", msg)
+        self.assertIn("📅 <b>Завтра, вт 17.11</b> · без світла 7 год", msg)
         self.assertIn("🔴 00:00–03:00\n🔴 14:00–18:00", msg)
 
     def test_change_explains_in_outcome_words(self):
