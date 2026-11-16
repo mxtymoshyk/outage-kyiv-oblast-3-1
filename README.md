@@ -13,7 +13,7 @@ URL: `webcal://raw.githubusercontent.com/mxtymoshyk/outage-kyiv-oblast-3-1/main/
 - **iPhone:** Settings → Apps → Calendar → Calendar Accounts → Add Account → Other → Add Subscribed Calendar → paste the URL → Next → turn **off** "Remove Alerts" → Save.
 - **Mac:** Calendar → File → New Calendar Subscription → URL → Location **iCloud** (it then shows up on iPhone too) → Auto-refresh: every 15 minutes → uncheck Alerts under Remove.
 
-Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirror of dtek-krem.com.ua that updates every few minutes.
+Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirror of dtek-krem.com.ua that updates every few minutes. **If the mirror breaks** (stale, empty, or unreachable), the bot reads dtek-krem.com.ua itself with a headless browser (Playwright, installed only then; takes about 1–2 minutes). The message then says "ДТЕК (напряму з сайту)" and comes with the bot's own picture.
 
 ## Setup
 1. Telegram: @BotFather → `/newbot` → token.

@@ -10,7 +10,8 @@ Messages between QUIET hours are silent. Also writes outage.ics. Stdlib only
 (Pillow is installed lazily just for the fallback picture).
 
 Data: github.com/Baskerville42/outage-data-ua. JSON and pictures are read from one
-commit, so the picture always matches the text.
+commit, so the picture always matches the text. If the mirror is broken, the bot reads
+DTEK's site itself with a headless browser (Playwright, installed only then).
 
 Env:
   TG_TOKEN, TG_CHAT_ID  bot token / comma-separated chat ids (empty = dry run)
@@ -27,6 +28,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,6 +46,7 @@ ALERT_AFTER_MIN = 60                                   # problem must persist th
 ICS_KEEP_DAYS = 14
 
 MIRROR = "Baskerville42/outage-data-ua"
+DTEK_URL = "https://www.dtek-krem.com.ua/ua/shutdowns"   # direct fallback when the mirror is broken
 DAYS_UA = ["пн", "вт", "ср", "чт", "пт", "сб", "нд"]
 Q = GROUP.replace("GPV", "")
 IMG_NAMES = [f"gpv-{Q.replace('.', '-')}-emergency.png",   # day table + legend only
@@ -171,6 +174,95 @@ def fetch_mirror_image(ref, name):
         return None
 
 
+def extract_fact(page_html):
+    """`DisconSchedule.fact = {...}` from the DTEK page -> dict (or None).
+    The object is followed by `</script>` on the same line, so find its end by brace matching."""
+    i = page_html.find("DisconSchedule.fact")
+    start = page_html.find("{", i) if i >= 0 else -1
+    if start < 0:
+        return None
+    depth, in_str, esc = 0, False, False
+    for k in range(start, len(page_html)):
+        c = page_html[k]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    fact = json.loads(page_html[start:k + 1])
+                except ValueError:
+                    return None
+                return fact if isinstance(fact, dict) and fact.get("data") else None
+    return None
+
+
+def import_playwright():
+    try:
+        from playwright.sync_api import sync_playwright
+        return sync_playwright
+    except ImportError:
+        pass
+    pip = [sys.executable, "-m", "pip", "install", "-q", "--user", "--break-system-packages", "playwright"]
+    subprocess.run(pip, check=True, timeout=240)
+    import importlib, site
+    sys.path.append(site.getusersitepackages())
+    importlib.invalidate_caches()
+    subprocess.run([sys.executable, "-m", "playwright", "install", "--with-deps", "chromium"],
+                   check=True, timeout=300)
+    from playwright.sync_api import sync_playwright
+    return sync_playwright
+
+
+def scrape_dtek():
+    """Read the schedule straight from DTEK's site with a real headless browser
+    (the site's anti-bot check needs JS + cookies), same way the mirror does it.
+    Only used in CI and only while the mirror is broken: it takes 1–2 min to set up."""
+    if not os.environ.get("GITHUB_ACTIONS"):
+        return None
+    try:
+        sync_playwright = import_playwright()
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"),
+                locale="uk-UA", timezone_id="Europe/Kyiv")
+            try:
+                for attempt in range(1, 4):
+                    page = ctx.new_page()
+                    try:
+                        page.goto(DTEK_URL, wait_until="networkidle", timeout=90_000)
+                        page.wait_for_timeout(500)
+                        fact = extract_fact(page.content())
+                        if fact:
+                            now = dt.datetime.now(dt.timezone.utc)
+                            return {"lastUpdated": now.isoformat().replace("+00:00", "Z"),
+                                    "lastUpdateStatus": {"ok": True, "code": 200},
+                                    "fact": fact, "via": "dtek"}
+                        print(f"::warning::DTEK page without schedule (anti-bot?), attempt {attempt}/3")
+                    except Exception as e:
+                        print(f"::warning::DTEK attempt {attempt}/3 failed: {e}")
+                    finally:
+                        page.close()
+                    if attempt < 3:
+                        time.sleep(2 * attempt)             # back off before retrying
+            finally:
+                browser.close()
+    except Exception as e:
+        print(f"::warning::direct DTEK scrape unavailable: {e}")
+    return None
+
+
 def group_days(src, today):
     """{date: 48 states} for our group, today and later."""
     days = {}
@@ -255,7 +347,7 @@ def news_line(days, today, changed, fresh, sent):
     return "\n".join(news) or "🟡 <b>Оновлено можливі відключення</b>"
 
 
-def schedule_text(days, today, changed, sent, update_stamp):
+def schedule_text(days, today, changed, sent, update_stamp, direct=False):
     first = not sent
     fresh = [d for d in changed if d.isoformat() not in sent]
     news = None if first else news_line(days, today, changed, fresh, sent)
@@ -263,7 +355,8 @@ def schedule_text(days, today, changed, sent, update_stamp):
     for d in sorted(days):                                   # chronological
         prev = None if first else sent.get(d.isoformat(), {}).get("off")
         parts.append(day_block(d, days[d], today, prev, is_new=(d in fresh and not first)))
-    parts.append(f"<i>Черга {Q} · ДТЕК, оновлено {html.escape(str(update_stamp))}</i>")
+    via = "ДТЕК (напряму з сайту)" if direct else "ДТЕК"
+    parts.append(f"<i>Черга {Q} · {via}, оновлено {html.escape(str(update_stamp))}</i>")
     return "\n\n".join(parts)
 
 
@@ -371,10 +464,17 @@ def render_image(days, today, update_stamp):
     return buf.getvalue()
 
 
-def picture(ref, days, today, update_stamp):
-    """Mirror's day table (same commit) -> own drawing -> mirror's full table -> no picture."""
+def picture(ref, days, today, update_stamp, direct=False):
+    """Mirror's day table (same commit) -> own drawing -> mirror's full table -> no picture.
+    With data read directly from DTEK the mirror's pictures can't be trusted: own drawing only."""
     if os.environ.get("NO_IMAGE") or os.environ.get("SOURCE_FILE"):
         return None
+    if direct:
+        try:
+            return render_image(days, today, update_stamp)
+        except Exception as e:
+            print(f"::warning::own drawing failed: {e}")
+            return None
     png = fetch_mirror_image(ref, IMG_NAMES[0])
     if png:
         return png
@@ -529,6 +629,13 @@ def main():
 
     # 0) health: alert once if broken for ALERT_AFTER_MIN+, once more when it recovers
     problem = source_problem(src, days, now)
+    direct = False
+    if problem:                                   # mirror broken -> try DTEK's site ourselves
+        scraped = scrape_dtek()
+        scraped_days = group_days(scraped, today) if scraped else {}
+        if scraped_days:
+            print(f"::notice::mirror problem ({problem}); using DTEK site directly")
+            src, days, problem, direct = scraped, scraped_days, None, True
     health = state.get("health", {})
     if problem:
         health.setdefault("since", now.isoformat(timespec="minutes"))
@@ -562,8 +669,8 @@ def main():
             force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
         if changed or force:
             stamp = (src.get("fact") or {}).get("update", "—")
-            text = schedule_text(days, today, changed, sent, stamp)
-            if send(text, now, photo=picture(ref, days, today, stamp)):
+            text = schedule_text(days, today, changed, sent, stamp, direct)
+            if send(text, now, photo=picture(ref, days, today, stamp, direct)):
                 for d in changed:
                     sent[d.isoformat()] = {"hash": schedule_hash(days[d]), "off": off_list(days[d])}
             else:

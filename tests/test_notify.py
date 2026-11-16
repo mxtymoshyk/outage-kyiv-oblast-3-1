@@ -3,6 +3,7 @@
 Run: python3 -m unittest discover -s tests -v
 """
 import datetime as dt
+import importlib.util
 import json
 import os
 import sys
@@ -42,13 +43,14 @@ class BotTest(unittest.TestCase):
             mock.patch.object(notify, "STATE_FILE", os.path.join(d, "state.json")),
             mock.patch.object(notify, "ICS_FILE", os.path.join(d, "outage.ics")),
             mock.patch.object(notify, "send", side_effect=self._send),
+            mock.patch.object(notify, "scrape_dtek", side_effect=lambda: self.scraped),
             mock.patch.dict(os.environ, {"SOURCE_FILE": self.src_file}, clear=False),
         ]
         for p in self.patches:
             p.start()
         for k in ("TG_TOKEN", "TG_CHAT_ID", "GITHUB_EVENT_NAME", "FORCE", "TEST_NOW"):
             os.environ.pop(k, None)
-        self.sent, self.deliver = [], True
+        self.sent, self.deliver, self.scraped = [], True, None
 
     def tearDown(self):
         for p in reversed(self.patches):
@@ -175,6 +177,16 @@ class BotTest(unittest.TestCase):
         msgs = self.run_bot("2026-11-16T08:05", {TODAY: BASE_TODAY}, group="GPV9.9")
         self.assertTrue(any("немає графіка для черги 3.1" in m for m in msgs))
 
+    def test_broken_mirror_falls_back_to_dtek_site(self):
+        old = dt.datetime(2026, 11, 16, 2, 0, tzinfo=KYIV)
+        ts = str(int(dt.datetime.combine(TODAY, dt.time(), KYIV).timestamp()))
+        self.scraped = {"lastUpdated": "2026-11-16T05:00:00Z", "lastUpdateStatus": {"ok": True},
+                        "fact": {"data": {ts: {"GPV3.1": BASE_TODAY}}, "update": "16.11.2026 06:40"}}
+        msg, = self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY}, updated=old)
+        self.assertIn("ДТЕК (напряму з сайту), оновлено 16.11.2026 06:40", msg)
+        later = self.run_bot("2026-11-16T08:05", {TODAY: BASE_TODAY}, updated=old)
+        self.assertFalse(any("⚠️" in m for m in later))      # data is fine, so no alarm
+
     # ---------- delivery failures ----------
     def test_failed_delivery_is_retried_next_run(self):
         self.deliver = False
@@ -193,8 +205,21 @@ class BotTest(unittest.TestCase):
         self.assertEqual(ics.count("BEGIN:VEVENT"), 3)
 
 
+class DtekPageTest(unittest.TestCase):
+    def test_extract_fact_like_the_real_page(self):
+        fact = {"data": {"1794780000": {"GPV3.1": BASE_TODAY}}, "update": "15.11 {x} \\\"q\\\"", "today": 1794780000}
+        page = ("<script>DisconSchedule.preset = {\"data\":{}}\nDisconSchedule.showTableFact = true\n"
+                f"DisconSchedule.fact = {json.dumps(fact)}</script><script>var t = \"}}\";</script>")
+        self.assertEqual(notify.extract_fact(page), fact)
+
+    def test_anti_bot_page_gives_nothing(self):
+        self.assertIsNone(notify.extract_fact("<html><body>Checking your browser…</body></html>"))
+        self.assertIsNone(notify.extract_fact("DisconSchedule.fact = {\"data\":{}}</script>"))
+
+
 class OwnPictureTest(unittest.TestCase):
-    @unittest.skipUnless(notify.import_pillow(), "Pillow not installed (only needed for the fallback)")
+    # find_spec, not import_pillow(): in CI that would pip-install Pillow on every run
+    @unittest.skipUnless(importlib.util.find_spec("PIL"), "Pillow not installed (only needed for the fallback)")
     def test_own_drawing_is_a_png(self):
         png = notify.render_image({TODAY: notify.half_hours(BASE_TODAY),
                                    TOMORROW: notify.half_hours(BASE_TOMORROW)}, TODAY, "15.11.2026 20:28")
