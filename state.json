@@ -1,24 +1,25 @@
 {
  "days": {
   "2026-11-16": {
-   "hash": "dde79f785b1e",
+   "hash": "6abf0694d0bd",
    "off": [
     [
      19,
      32
     ],
     [
-     45,
+     46,
      48
     ]
    ]
   }
  },
  "reminded": [
-  "2026-11-16@22:30"
+  "2026-11-16@22:30",
+  "2026-11-16@23:00"
  ],
  "cal": {
-  "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx"
+  "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxooooooooooooooxx"
  },
  "health": {}
 }
