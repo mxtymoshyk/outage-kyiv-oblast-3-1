@@ -132,10 +132,25 @@ class BotTest(unittest.TestCase):
         changed = day(off=range(9, 16))  # 08:00–15:00 ... ends at 15:00
         changed["16"] = "first"           # ... + 15:00–15:30
         msg, = self.run_bot("2026-11-16T06:30", {TODAY: changed})   # before the 08:00 reminder window
-        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · без світла на 30 хв менше"))
+        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · відключення скоротили на 30 хв"))
         self.assertIn("🔴 08:00–15:30", msg)
-        self.assertIn("↳ тепер без світла: 08:00–09:30", msg)
-        self.assertIn("↳ тепер зі світлом: 15:30–16:00, 22:30–24:00", msg)
+        self.assertIn("↳ 09:30–16:00 → 08:00–15:30", msg)
+        self.assertIn("↳ скасовано 22:30–24:00", msg)
+        self.assertNotIn("зі світлом", msg)   # a range always means an outage
+
+    def test_evening_shift_reads_as_was_now(self):
+        self.run_bot("2026-11-16T18:00", {TODAY: BASE_TODAY})
+        msg, = self.run_bot("2026-11-16T19:00", {TODAY: BASE_TODAY | {"23": "yes"}})
+        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · відключення скоротили на 30 хв"))
+        self.assertIn("↳ 22:30–24:00 → 23:00–24:00", msg)
+
+    def test_new_outage_and_split(self):
+        self.run_bot("2026-11-16T05:00", {TODAY: BASE_TODAY})
+        split = BASE_TODAY | {"13": "yes", "19": "no"}         # 09:30–16:00 split at 12–13; new 18–19
+        msg, = self.run_bot("2026-11-16T06:00", {TODAY: split})
+        self.assertIn("↳ 09:30–16:00 → 09:30–12:00, 13:00–16:00", msg)
+        self.assertIn("↳ нове 18:00–19:00", msg)
+        self.assertIn("відключення перенесли", msg)
 
     def test_maybe_only_change(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
@@ -178,7 +193,7 @@ class BotTest(unittest.TestCase):
         self.run_bot("2026-11-16T21:37", {TODAY: BASE_TODAY})                           # reminded 22:30
         earlier = BASE_TODAY | {"22": "second"}                                          # now from 21:30
         msgs = self.run_bot("2026-11-16T21:05", {TODAY: earlier})
-        self.assertTrue(any("тепер без світла: 21:30–22:00" in m for m in msgs))
+        self.assertTrue(any("↳ нове 21:30–22:00" in m for m in msgs))
 
     def test_force_after_past_only_edit_shows_no_fake_diff(self):
         self.run_bot("2026-11-16T21:00", {TODAY: BASE_TODAY})

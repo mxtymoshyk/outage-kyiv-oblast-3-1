@@ -333,13 +333,40 @@ def day_block(date, states, today, prev_off=None, is_new=False):
     if maybe:
         lines.append(f"🟡 Можливо: {', '.join(maybe)}")
     if edited:
-        old = {i for a, b in prev_off for i in range(a, b)}
-        new = {i for a, b in offs for i in range(a, b)}
-        if new - old:
-            lines.append(f"<i>↳ тепер без світла: {span_list(new - old)}</i>")
-        if old - new:
-            lines.append(f"<i>↳ тепер зі світлом: {span_list(old - new)}</i>")
+        lines += [f"<i>↳ {x}</i>" for x in change_lines(prev_off, offs)]
     return "\n".join(lines)
+
+
+def change_lines(prev_off, offs):
+    """Outage changes as "was → now", like a train timetable. Every time range in the message
+    is an outage, so a power window is never shown as a range (that read as one more outage)."""
+    old = [tuple(x) for x in prev_off if list(x) not in offs]
+    new = [tuple(x) for x in offs if list(x) not in prev_off]
+    overlap = lambda p, q: p[0] < q[1] and q[0] < p[1]
+    fmt = lambda xs: ", ".join(f"{hm(a)}–{hm(b)}" for a, b in sorted(xs))
+    out, used_old, used_new = [], set(), set()
+    for i, o in enumerate(old):                      # group overlapping old/new outages
+        if i in used_old:
+            continue
+        g_old, g_new = {i}, set()
+        grew = True
+        while grew:
+            grew = False
+            for j, n in enumerate(new):
+                if j not in g_new and any(overlap(old[k], n) for k in g_old):
+                    g_new.add(j); grew = True
+            for k, o2 in enumerate(old):
+                if k not in g_old and any(overlap(o2, new[j]) for j in g_new):
+                    g_old.add(k); grew = True
+        used_old |= g_old
+        used_new |= g_new
+        was = fmt(old[k] for k in g_old)
+        out.append((min(old[k][0] for k in g_old),
+                    f"{was} → {fmt(new[j] for j in g_new)}" if g_new else f"скасовано {was}"))
+    for j, n in enumerate(new):
+        if j not in used_new:
+            out.append((n[0], f"нове {fmt([n])}"))
+    return [text for _, text in sorted(out)]
 
 
 def news_line(days, today, changed, fresh, sent):
@@ -358,9 +385,9 @@ def news_line(days, today, changed, fresh, sent):
             amount = f"без світла {dur(total_off(offs))}" if offs else "без відключень"
             news.append(f"🆕 <b>Графік на {word(d)}</b> · {amount}")
         elif prev != offs:
-            net = total_off(offs) - total_off(prev)
-            delta = (f"без світла на {dur(abs(net))} {'більше' if net > 0 else 'менше'}"
-                     if net else "час без світла той самий")
+            net = total_off(offs) - total_off(prev)    # say what happened to the outages
+            delta = (f"відключення подовжили на {dur(net)}" if net > 0 else
+                     f"відключення скоротили на {dur(-net)}" if net < 0 else "відключення перенесли")
             news.append(f"✏️ <b>Змінився графік на {word(d)}</b> · {delta}")
     return "\n".join(news) or "🟡 <b>Оновлено можливі відключення</b>"
 
