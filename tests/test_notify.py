@@ -168,7 +168,7 @@ class BotTest(unittest.TestCase):
     def test_reminder_once_before_outage(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         msgs = self.run_bot("2026-11-16T08:40", {TODAY: BASE_TODAY})
-        self.assertEqual(msgs, ["⏰ <b>О 09:30 вимкнуть світло</b> · через 50 хв\nДо 16:00 · 6,5 год без світла"])
+        self.assertEqual(msgs, ["⏰ <b>О 09:30 вимкнуть світло</b> · через 50 хв\nДо 16:00 · 6½ год без світла"])
         self.assertEqual(self.run_bot("2026-11-16T08:55", {TODAY: BASE_TODAY}), [])
 
     def test_reminder_spans_midnight(self):
@@ -176,7 +176,7 @@ class BotTest(unittest.TestCase):
         self.run_bot("2026-11-16T20:00", days)
         msg, = self.run_bot("2026-11-16T21:40", days)
         self.assertIn("О 22:30 вимкнуть світло", msg)
-        self.assertIn("До 03:00 завтра · 4,5 год без світла", msg)
+        self.assertIn("До 03:00 завтра · 4½ год без світла", msg)
 
     def test_evening_of_16_nov_replayed(self):
         # real case: outage 22:30–24:00; DTEK moved it to 23:00 at 22:41, back to 22:30 at 22:45

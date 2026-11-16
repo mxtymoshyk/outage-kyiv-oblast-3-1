@@ -86,7 +86,7 @@ def dur(n_half):
     h, half = divmod(n_half, 2)
     if not h:
         return "30 хв"
-    return f"{h},5 год" if half else f"{h} год"
+    return f"{h}½ год" if half else f"{h} год"      # "7½", not "7,5": read as a phrase, no decimal
 
 
 def until(minutes):
