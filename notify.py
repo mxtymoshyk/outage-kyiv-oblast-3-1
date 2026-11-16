@@ -320,53 +320,61 @@ def day_label(date, today):
 
 
 def day_block(date, states, today, prev_off=None, is_new=False):
-    """One self-contained block per day: header · total, times, and what changed."""
+    """One self-contained block per day: header · total, then one line per outage
+    (chronological), each change noted next to the outage it belongs to."""
     offs = off_list(states)
     total = total_off(offs)
     edited = prev_off is not None and prev_off != offs
     mark = " ✏️" if edited else " 🆕" if is_new else ""
     head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>{mark}"
     lines = [f"{head} · без світла {dur(total)}" if total else f"{head} · без відключень 🟢"]
-    if offs:
-        lines.append(f"🔴 {ranges(offs)}")
-    maybe = [f"{hm(a)}–{hm(b)}" for x, a, b in runs(states) if x == "maybe"]
-    if maybe:
-        lines.append(f"🟡 Можливо: {', '.join(maybe)}")
-    if edited:
-        lines += [f"<i>↳ {x}</i>" for x in change_lines(prev_off, offs)]
+    notes, cancelled = change_notes(prev_off, offs) if edited else ({}, [])
+    rows = []
+    for a, b in offs:
+        note = notes.get((a, b))
+        rows.append((a, f"🔴 {hm(a)}–{hm(b)}" + (f" <i>· {note}</i>" if note else "")))
+    for a, b in cancelled:
+        rows.append((a, f"⚪ <s>{hm(a)}–{hm(b)}</s> <i>· скасовано</i>"))
+    for x, a, b in runs(states):
+        if x == "maybe":
+            rows.append((a, f"🟡 {hm(a)}–{hm(b)} <i>· можливо</i>"))
+    lines += [text for _, text in sorted(rows)]
     return "\n".join(lines)
 
 
-def change_lines(prev_off, offs):
-    """Outage changes as "was → now", like a train timetable. Every time range in the message
-    is an outage, so a power window is never shown as a range (that read as one more outage)."""
+def change_notes(prev_off, offs):
+    """Outage changes like a train timetable: each new/changed outage gets "було …" or
+    "нове"; fully removed ones are returned to show as cancelled.
+    Every time range in a message means an outage, so power windows are never shown as ranges."""
     old = [tuple(x) for x in prev_off if list(x) not in offs]
     new = [tuple(x) for x in offs if list(x) not in prev_off]
     overlap = lambda p, q: p[0] < q[1] and q[0] < p[1]
     fmt = lambda xs: ", ".join(f"{hm(a)}–{hm(b)}" for a, b in sorted(xs))
-    out, used_old, used_new = [], set(), set()
-    for i, o in enumerate(old):                      # group overlapping old/new outages
+    notes, cancelled, used_new = {}, [], set()
+    used_old = set()
+    for i in range(len(old)):                        # group overlapping old/new outages
         if i in used_old:
             continue
-        g_old, g_new = {i}, set()
-        grew = True
+        g_old, g_new, grew = {i}, set(), True
         while grew:
             grew = False
             for j, n in enumerate(new):
                 if j not in g_new and any(overlap(old[k], n) for k in g_old):
                     g_new.add(j); grew = True
-            for k, o2 in enumerate(old):
-                if k not in g_old and any(overlap(o2, new[j]) for j in g_new):
+            for k, o in enumerate(old):
+                if k not in g_old and any(overlap(o, new[j]) for j in g_new):
                     g_old.add(k); grew = True
         used_old |= g_old
         used_new |= g_new
-        was = fmt(old[k] for k in g_old)
-        out.append((min(old[k][0] for k in g_old),
-                    f"{was} → {fmt(new[j] for j in g_new)}" if g_new else f"скасовано {was}"))
+        if g_new:
+            for j in g_new:
+                notes[new[j]] = f"було {fmt(old[k] for k in g_old)}"
+        else:
+            cancelled += [old[k] for k in g_old]
     for j, n in enumerate(new):
         if j not in used_new:
-            out.append((n[0], f"нове {fmt([n])}"))
-    return [text for _, text in sorted(out)]
+            notes[n] = "нове"
+    return notes, sorted(cancelled)
 
 
 def news_line(days, today, changed, fresh, sent):

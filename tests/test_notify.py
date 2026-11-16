@@ -98,7 +98,7 @@ class BotTest(unittest.TestCase):
         msgs = self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         self.assertEqual(len(msgs), 1)
         self.assertTrue(msgs[0].startswith("📅 <b>Сьогодні, пн 16.11</b> · без світла 8 год"))
-        self.assertIn("🔴 09:30–16:00, 22:30–24:00", msgs[0])
+        self.assertIn("🔴 09:30–16:00\n🔴 22:30–24:00", msgs[0])
 
     def test_unchanged_schedule_sends_nothing(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
@@ -125,7 +125,7 @@ class BotTest(unittest.TestCase):
         self.assertTrue(msg.startswith("🆕 <b>Графік на завтра</b> · без світла 7 год"))
         self.assertLess(msg.index("📅 <b>Сьогодні"), msg.index("📅 <b>Завтра"))
         self.assertIn("📅 <b>Завтра, вт 17.11</b> 🆕", msg)
-        self.assertIn("🔴 00:00–03:00, 14:00–18:00", msg)
+        self.assertIn("🔴 00:00–03:00\n🔴 14:00–18:00", msg)
 
     def test_change_explains_in_outcome_words(self):
         self.run_bot("2026-11-16T06:00", {TODAY: BASE_TODAY})
@@ -133,30 +133,28 @@ class BotTest(unittest.TestCase):
         changed["16"] = "first"           # ... + 15:00–15:30
         msg, = self.run_bot("2026-11-16T06:30", {TODAY: changed})   # before the 08:00 reminder window
         self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · відключення скоротили на 30 хв"))
-        self.assertIn("🔴 08:00–15:30", msg)
-        self.assertIn("↳ 09:30–16:00 → 08:00–15:30", msg)
-        self.assertIn("↳ скасовано 22:30–24:00", msg)
+        self.assertIn("🔴 08:00–15:30 <i>· було 09:30–16:00</i>\n⚪ <s>22:30–24:00</s> <i>· скасовано</i>", msg)
         self.assertNotIn("зі світлом", msg)   # a range always means an outage
 
     def test_evening_shift_reads_as_was_now(self):
         self.run_bot("2026-11-16T18:00", {TODAY: BASE_TODAY})
         msg, = self.run_bot("2026-11-16T19:00", {TODAY: BASE_TODAY | {"23": "yes"}})
         self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · відключення скоротили на 30 хв"))
-        self.assertIn("↳ 22:30–24:00 → 23:00–24:00", msg)
+        self.assertIn("🔴 09:30–16:00\n🔴 23:00–24:00 <i>· було 22:30–24:00</i>", msg)
 
     def test_new_outage_and_split(self):
         self.run_bot("2026-11-16T05:00", {TODAY: BASE_TODAY})
         split = BASE_TODAY | {"13": "yes", "19": "no"}         # 09:30–16:00 split at 12–13; new 18–19
         msg, = self.run_bot("2026-11-16T06:00", {TODAY: split})
-        self.assertIn("↳ 09:30–16:00 → 09:30–12:00, 13:00–16:00", msg)
-        self.assertIn("↳ нове 18:00–19:00", msg)
+        self.assertIn("🔴 09:30–12:00 <i>· було 09:30–16:00</i>\n🔴 13:00–16:00 <i>· було 09:30–16:00</i>", msg)
+        self.assertIn("🔴 18:00–19:00 <i>· нове</i>", msg)
         self.assertIn("відключення перенесли", msg)
 
     def test_maybe_only_change(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         msg, = self.run_bot("2026-11-16T07:30", {TODAY: BASE_TODAY | {"20": "maybe"}})
         self.assertTrue(msg.startswith("🟡 <b>Оновлено можливі відключення</b>"))
-        self.assertIn("🟡 Можливо: 19:00–20:00", msg)
+        self.assertIn("🟡 19:00–20:00 <i>· можливо</i>", msg)
 
     def test_day_without_outages(self):
         msg, = self.run_bot("2026-11-16T07:00", {TODAY: day()})
@@ -193,13 +191,13 @@ class BotTest(unittest.TestCase):
         self.run_bot("2026-11-16T21:37", {TODAY: BASE_TODAY})                           # reminded 22:30
         earlier = BASE_TODAY | {"22": "second"}                                          # now from 21:30
         msgs = self.run_bot("2026-11-16T21:05", {TODAY: earlier})
-        self.assertTrue(any("↳ нове 21:30–22:00" in m for m in msgs))
+        self.assertTrue(any("🔴 21:30–22:00 <i>· нове</i>" in m for m in msgs))
 
     def test_force_after_past_only_edit_shows_no_fake_diff(self):
         self.run_bot("2026-11-16T21:00", {TODAY: BASE_TODAY})
         self.run_bot("2026-11-16T22:52", {TODAY: BASE_TODAY | {"23": "yes"}})
         msg, = self.run_bot("2026-11-16T22:55", {TODAY: BASE_TODAY | {"23": "yes"}}, FORCE="true")
-        self.assertNotIn("↳", msg)
+        self.assertNotIn("було", msg)
         self.assertNotIn("✏️", msg)
 
     # ---------- health ----------
