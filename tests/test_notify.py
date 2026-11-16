@@ -165,6 +165,28 @@ class BotTest(unittest.TestCase):
         self.assertIn("О 22:30 вимкнуть світло", msg)
         self.assertIn("До 03:00 завтра · 4,5 год без світла", msg)
 
+    def test_evening_of_16_nov_replayed(self):
+        # real case: outage 22:30–24:00; DTEK moved it to 23:00 at 22:41, back to 22:30 at 22:45
+        moved = BASE_TODAY | {"23": "yes"}
+        self.run_bot("2026-11-16T21:00", {TODAY: BASE_TODAY})
+        self.assertEqual(len(self.run_bot("2026-11-16T21:37", {TODAY: BASE_TODAY})), 1)  # reminder 22:30
+        self.assertEqual(self.run_bot("2026-11-16T22:52", {TODAY: moved}), [])          # past edit + same outage
+        self.assertEqual(self.run_bot("2026-11-16T22:58", {TODAY: BASE_TODAY}), [])     # reverted, still past
+
+    def test_future_edit_still_reported_and_earlier_shift_reminded(self):
+        self.run_bot("2026-11-16T21:00", {TODAY: BASE_TODAY})
+        self.run_bot("2026-11-16T21:37", {TODAY: BASE_TODAY})                           # reminded 22:30
+        earlier = BASE_TODAY | {"22": "second"}                                          # now from 21:30
+        msgs = self.run_bot("2026-11-16T21:05", {TODAY: earlier})
+        self.assertTrue(any("тепер без світла: 21:30–22:00" in m for m in msgs))
+
+    def test_force_after_past_only_edit_shows_no_fake_diff(self):
+        self.run_bot("2026-11-16T21:00", {TODAY: BASE_TODAY})
+        self.run_bot("2026-11-16T22:52", {TODAY: BASE_TODAY | {"23": "yes"}})
+        msg, = self.run_bot("2026-11-16T22:55", {TODAY: BASE_TODAY | {"23": "yes"}}, FORCE="true")
+        self.assertNotIn("↳", msg)
+        self.assertNotIn("✏️", msg)
+
     # ---------- health ----------
     def test_stale_source_alerts_once_then_recovers(self):
         old = dt.datetime(2026, 11, 16, 2, 0, tzinfo=KYIV)

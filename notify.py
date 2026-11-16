@@ -131,6 +131,24 @@ def ranges(offs):
     return ", ".join(f"{hm(a)}–{hm(b)}" for a, b in offs)
 
 
+STATE_CODE = {"on": "o", "off": "x", "maybe": "?"}
+
+
+def encode_states(states):
+    return "".join(STATE_CODE[x] for x in states)
+
+
+def prev_states(entry):
+    """Last announced 48 states of a day. Older state files kept only the outage list."""
+    if entry.get("s"):
+        back = {v: k for k, v in STATE_CODE.items()}
+        return [back[c] for c in entry["s"]]
+    out = ["on"] * 48
+    for a, b in entry.get("off", []):
+        out[a:b] = ["off"] * (b - a)
+    return out
+
+
 def schedule_hash(states):
     return hashlib.sha1("".join(states).encode()).hexdigest()[:12]
 
@@ -360,6 +378,20 @@ def schedule_text(days, today, changed, sent, update_stamp, direct=False):
     return "\n\n".join(parts)
 
 
+def key_minutes(key):
+    """'2026-11-16@22:30' -> minutes since that date's midnight, counted from 2000-01-01."""
+    day, t = key.split("@")
+    d = dt.date.fromisoformat(day)
+    return (d - dt.date(2000, 1, 1)).days * 1440 + int(t[:2]) * 60 + int(t[3:])
+
+
+def shifted_later(key, reminded):
+    """True if we already reminded an outage starting up to 60 min earlier: DTEK just moved
+    the same outage later (e.g. 22:30 -> 23:00). Moved *earlier* is new info, so not here."""
+    m = key_minutes(key)
+    return any(0 < m - key_minutes(r) <= 60 for r in reminded)
+
+
 def reminders_due(t_today, t_tom, now, reminded):
     """[(key, text)] for outages starting within REMIND_MIN that weren't reminded yet."""
     today = now.date()
@@ -372,7 +404,7 @@ def reminders_due(t_today, t_tom, now, reminded):
             continue
         lead = a * 30 - mins_now
         key = f"{(today if a < 48 else tomorrow).isoformat()}@{hm(a, True)}"
-        if 0 < lead <= REMIND_MIN and key not in reminded:
+        if 0 < lead <= REMIND_MIN and key not in reminded and not shifted_later(key, reminded):
             end = f"{hm(b)}{' завтра' if b > 48 else ''}"
             out.append((key, f"⏰ <b>О {hm(a, True)} вимкнуть світло</b> · через {until(lead)}\n"
                              f"До {end} · {dur(b - a)} без світла"))
@@ -661,20 +693,40 @@ def main():
 
         # 1) schedule message on change (manual "Run workflow" always sends)
         changed = [d for d, s in days.items() if sent.get(d.isoformat(), {}).get("hash") != schedule_hash(s)]
+        # Edits to the past or the current half-hour (DTEK sometimes rewrites an outage that
+        # already started) can't be acted on: store them silently, report only the future.
+        cut = now.hour * 2 + (1 if now.minute >= 30 else 0) + 1
+        view, meaningful = dict(sent), []
+        for d in changed:
+            entry = sent.get(d.isoformat())
+            if not entry:
+                meaningful.append(d)                 # newly published day
+                continue
+            prev = prev_states(entry)
+            c = cut if d == today else 0
+            merged = [days[d][i] if i < c else prev[i] for i in range(48)]
+            if merged != days[d]:
+                meaningful.append(d)
+                view[d.isoformat()] = {**entry, "off": off_list(merged)}
+            else:                                    # past-only edit: show the day as unchanged
+                view[d.isoformat()] = {**entry, "off": off_list(days[d])}
         # FORCE comes from the workflow input: manual "Run workflow" -> true, external
         # 15-min trigger -> false. Without FORCE, any manual dispatch forces (old workflow).
         if "FORCE" in os.environ:
             force = os.environ["FORCE"].lower() in ("1", "true")
         else:
             force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-        if changed or force:
+        record = lambda: sent.update({d.isoformat(): {"hash": schedule_hash(days[d]), "off": off_list(days[d]),
+                                                      "s": encode_states(days[d])} for d in changed})
+        if meaningful or force:
             stamp = (src.get("fact") or {}).get("update", "—")
-            text = schedule_text(days, today, changed, sent, stamp, direct)
+            text = schedule_text(days, today, meaningful, view, stamp, direct)
             if send(text, now, photo=picture(ref, days, today, stamp, direct)):
-                for d in changed:
-                    sent[d.isoformat()] = {"hash": schedule_hash(days[d]), "off": off_list(days[d])}
+                record()
             else:
                 failed.append("schedule")
+        else:
+            record()                                 # past-only edits: remember, don't announce
 
         # 2) reminders
         if REMIND_MIN:
