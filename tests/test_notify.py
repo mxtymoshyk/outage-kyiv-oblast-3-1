@@ -94,11 +94,13 @@ class BotTest(unittest.TestCase):
             return json.load(f)
 
     # ---------- schedule messages ----------
-    def test_first_run_sends_days_without_news_line(self):
-        msgs = self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
-        self.assertEqual(len(msgs), 1)
-        self.assertTrue(msgs[0].startswith("📅 <b>Сьогодні, пн 16.11</b> · без світла 8 год"))
+    def test_first_run_one_message_per_day(self):
+        msgs = self.run_bot("2026-11-16T05:00", {TODAY: BASE_TODAY, TOMORROW: BASE_TOMORROW})
+        self.assertEqual(len(msgs), 2)
+        self.assertTrue(msgs[0].startswith("⚡ <b>Графік на сьогодні, пн 16.11</b>\nбез світла 8 год"))
         self.assertIn("🔴 09:30–16:00\n🔴 22:30–24:00", msgs[0])
+        self.assertTrue(msgs[1].startswith("⚡ <b>Графік на завтра, вт 17.11</b>\nбез світла 7 год"))
+        self.assertNotIn("Сьогодні", msgs[1])
 
     def test_unchanged_schedule_sends_nothing(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
@@ -109,7 +111,7 @@ class BotTest(unittest.TestCase):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         msgs = self.run_bot("2026-11-16T07:15", {TODAY: BASE_TODAY}, GITHUB_EVENT_NAME="workflow_dispatch")
         self.assertEqual(len(msgs), 1)
-        self.assertTrue(msgs[0].startswith("📅 <b>Сьогодні"))
+        self.assertTrue(msgs[0].startswith("⚡ <b>Графік на сьогодні"))
         self.assertNotIn("можливі", msgs[0])
 
     def test_external_trigger_with_force_false_stays_quiet(self):
@@ -119,27 +121,42 @@ class BotTest(unittest.TestCase):
         self.assertEqual(len(self.run_bot("2026-11-16T07:30", {TODAY: BASE_TODAY},
                                           GITHUB_EVENT_NAME="workflow_dispatch", FORCE="true")), 1)
 
-    def test_new_tomorrow_news_on_top_days_in_order(self):
+    def test_new_tomorrow_is_its_own_message(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         msg, = self.run_bot("2026-11-16T20:10", {TODAY: BASE_TODAY, TOMORROW: BASE_TOMORROW})
-        self.assertTrue(msg.startswith("🆕 <b>Графік на завтра</b> · без світла 7 год"))
-        self.assertLess(msg.index("📅 <b>Сьогодні"), msg.index("📅 <b>Завтра"))
-        self.assertIn("📅 <b>Завтра, вт 17.11</b> · без світла 7 год", msg)
+        self.assertTrue(msg.startswith("🆕 <b>Графік на завтра, вт 17.11</b>\nбез світла 7 год"))
         self.assertIn("🔴 00:00–03:00\n🔴 14:00–18:00", msg)
+        self.assertNotIn("09:30", msg)                     # nothing about today
+
+    def test_morning_digest_once(self):
+        self.run_bot("2026-11-16T20:10", {TODAY: BASE_TODAY, TOMORROW: BASE_TOMORROW})
+        self.assertEqual(self.run_bot("2026-11-17T06:52", {TOMORROW: BASE_TOMORROW}), [])   # before 07:00
+        msg, = self.run_bot("2026-11-17T07:07", {TOMORROW: BASE_TOMORROW})
+        self.assertTrue(msg.startswith("☀️ <b>Графік на сьогодні, вт 17.11</b>\nбез світла 7 год"))
+        self.assertEqual(self.run_bot("2026-11-17T07:22", {TOMORROW: BASE_TOMORROW}), [])
+
+    def test_change_this_morning_replaces_digest(self):
+        self.run_bot("2026-11-16T20:10", {TODAY: BASE_TODAY, TOMORROW: BASE_TOMORROW})
+        msgs = self.run_bot("2026-11-17T07:07", {TOMORROW: BASE_TOMORROW | {"16": "yes"}})
+        self.assertEqual(len(msgs), 1)
+        self.assertTrue(msgs[0].startswith("✏️ <b>Змінився графік на сьогодні, вт 17.11</b>"))
+        self.assertEqual(self.run_bot("2026-11-17T07:22", {TOMORROW: BASE_TOMORROW | {"16": "yes"}}), [])
 
     def test_change_explains_in_outcome_words(self):
         self.run_bot("2026-11-16T06:00", {TODAY: BASE_TODAY})
         changed = day(off=range(9, 16))  # 08:00–15:00 ... ends at 15:00
         changed["16"] = "first"           # ... + 15:00–15:30
         msg, = self.run_bot("2026-11-16T06:30", {TODAY: changed})   # before the 08:00 reminder window
-        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · відключення скоротили на 30 хв"))
+        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні, пн 16.11</b>\n"
+                                       "без світла 7½ год · відключення скоротили на 30 хв"))
         self.assertIn("🔴 08:00–15:30 <i>· було 09:30–16:00</i>\n⚪ <s>22:30–24:00</s> <i>· скасовано</i>", msg)
         self.assertNotIn("зі світлом", msg)   # a range always means an outage
 
     def test_evening_shift_reads_as_was_now(self):
         self.run_bot("2026-11-16T18:00", {TODAY: BASE_TODAY})
         msg, = self.run_bot("2026-11-16T19:00", {TODAY: BASE_TODAY | {"23": "yes"}})
-        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні</b> · відключення скоротили на 30 хв"))
+        self.assertTrue(msg.startswith("✏️ <b>Змінився графік на сьогодні, пн 16.11</b>"))
+        self.assertIn("відключення скоротили на 30 хв", msg)
         self.assertIn("🔴 09:30–16:00\n🔴 23:00–24:00 <i>· було 22:30–24:00</i>", msg)
 
     def test_new_outage_and_split(self):
@@ -153,7 +170,8 @@ class BotTest(unittest.TestCase):
     def test_maybe_only_change(self):
         self.run_bot("2026-11-16T07:00", {TODAY: BASE_TODAY})
         msg, = self.run_bot("2026-11-16T07:30", {TODAY: BASE_TODAY | {"20": "maybe"}})
-        self.assertTrue(msg.startswith("🟡 <b>Оновлено можливі відключення</b>"))
+        self.assertTrue(msg.startswith("🟡 <b>Графік на сьогодні, пн 16.11</b>\n"
+                                       "без світла 8 год · змінились можливі відключення"))
         self.assertIn("🟡 19:00–20:00 <i>· можливо</i>", msg)
 
     def test_day_without_outages(self):

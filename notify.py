@@ -41,6 +41,7 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 ICS_FILE = os.environ.get("ICS_FILE", "outage.ics")
 REMIND_MIN = int(os.environ.get("REMIND_MIN", "60") or 0)
 QUIET = os.environ.get("QUIET", "23-7")
+DIGEST_HOUR = int(os.environ.get("DIGEST_HOUR", "7"))  # morning "Графік на сьогодні" (first run after it)
 STALE_MIN = int(os.environ.get("STALE_MIN", "180"))   # source older than this = broken
 ALERT_AFTER_MIN = 60                                   # problem must persist this long
 ICS_KEEP_DAYS = 14
@@ -319,16 +320,26 @@ def day_label(date, today):
     return f"{date:%d.%m}"
 
 
-def day_block(date, states, today, prev_off=None, is_new=False):
-    """One self-contained block per day: header · total, then one line per outage
-    (chronological), each change noted next to the outage it belongs to."""
+def day_message(kind, date, states, today, prev_off, update_stamp, direct=False):
+    """One message = one day. kind: digest (morning) · new (day published) · change ·
+    maybe (only possible outages changed) · show (manual run / first run).
+    First two lines are what a lock-screen preview shows: which day, and how much without power."""
+    icon = {"digest": "☀️", "new": "🆕", "change": "✏️", "maybe": "🟡", "show": "⚡"}[kind]
     offs = off_list(states)
     total = total_off(offs)
-    # no ✏️/🆕 on the day itself: the news line names the day, the "· було …" notes show what changed
-    edited = prev_off is not None and prev_off != offs
-    head = f"📅 <b>{day_label(date, today)}, {DAYS_UA[date.weekday()]} {date:%d.%m}</b>"
-    lines = [f"{head} · без світла {dur(total)}" if total else f"{head} · без відключень 🟢"]
-    notes, cancelled = change_notes(prev_off, offs) if edited else ({}, [])
+    label = day_label(date, today)
+    when = (f"на {label.lower()}, " if label in ("Сьогодні", "Завтра") else "на ") + \
+        f"{DAYS_UA[date.weekday()]} {date:%d.%m}"
+    title = f"{icon} <b>{'Змінився графік' if kind == 'change' else 'Графік'} {when}</b>"
+    summary = f"без світла {dur(total)}" if total else "без відключень 🟢"
+    if kind == "change":
+        net = total - total_off(prev_off)                 # say what happened to the outages
+        summary += " · " + (f"відключення подовжили на {dur(net)}" if net > 0 else
+                            f"відключення скоротили на {dur(-net)}" if net < 0 else "відключення перенесли")
+    elif kind == "maybe":
+        summary += " · змінились можливі відключення"
+
+    notes, cancelled = change_notes(prev_off, offs) if kind == "change" else ({}, [])
     rows = []
     for a, b in offs:
         note = notes.get((a, b))
@@ -338,8 +349,12 @@ def day_block(date, states, today, prev_off=None, is_new=False):
     for x, a, b in runs(states):
         if x == "maybe":
             rows.append((a, f"🟡 {hm(a)}–{hm(b)} <i>· можливо</i>"))
-    lines += [text for _, text in sorted(rows)]
-    return "\n".join(lines)
+    via = "ДТЕК (напряму з сайту)" if direct else "ДТЕК"
+    parts = [f"{title}\n{summary}"]
+    if rows:
+        parts.append("\n".join(text for _, text in sorted(rows)))
+    parts.append(f"<i>Черга {Q} · {via}, оновлено {html.escape(str(update_stamp))}</i>")
+    return "\n\n".join(parts)
 
 
 def change_notes(prev_off, offs):
@@ -375,42 +390,6 @@ def change_notes(prev_off, offs):
         if j not in used_new:
             notes[n] = "нове"
     return notes, sorted(cancelled)
-
-
-def news_line(days, today, changed, fresh, sent):
-    """Top line(s) = the news; it is what a lock-screen preview shows. None = no news."""
-    if not changed:
-        return None
-
-    def word(d):
-        return day_label(d, today).lower() if d <= today + dt.timedelta(days=1) else f"{d:%d.%m}"
-
-    news = []
-    for d in sorted(changed):
-        offs = off_list(days[d])
-        prev = sent.get(d.isoformat(), {}).get("off")
-        if d in fresh:
-            amount = f"без світла {dur(total_off(offs))}" if offs else "без відключень"
-            news.append(f"🆕 <b>Графік на {word(d)}</b> · {amount}")
-        elif prev != offs:
-            net = total_off(offs) - total_off(prev)    # say what happened to the outages
-            delta = (f"відключення подовжили на {dur(net)}" if net > 0 else
-                     f"відключення скоротили на {dur(-net)}" if net < 0 else "відключення перенесли")
-            news.append(f"✏️ <b>Змінився графік на {word(d)}</b> · {delta}")
-    return "\n".join(news) or "🟡 <b>Оновлено можливі відключення</b>"
-
-
-def schedule_text(days, today, changed, sent, update_stamp, direct=False):
-    first = not sent
-    fresh = [d for d in changed if d.isoformat() not in sent]
-    news = None if first else news_line(days, today, changed, fresh, sent)
-    parts = [news] if news else []
-    for d in sorted(days):                                   # chronological
-        prev = None if first else sent.get(d.isoformat(), {}).get("off")
-        parts.append(day_block(d, days[d], today, prev, is_new=(d in fresh and not first)))
-    via = "ДТЕК (напряму з сайту)" if direct else "ДТЕК"
-    parts.append(f"<i>Черга {Q} · {via}, оновлено {html.escape(str(update_stamp))}</i>")
-    return "\n\n".join(parts)
 
 
 def key_minutes(key):
@@ -751,17 +730,41 @@ def main():
             force = os.environ["FORCE"].lower() in ("1", "true")
         else:
             force = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
-        record = lambda: sent.update({d.isoformat(): {"hash": schedule_hash(days[d]), "off": off_list(days[d]),
-                                                      "s": encode_states(days[d])} for d in changed})
-        if meaningful or force:
-            stamp = (src.get("fact") or {}).get("update", "—")
-            text = schedule_text(days, today, meaningful, view, stamp, direct)
-            if send(text, now, photo=picture(ref, days, today, stamp, direct)):
-                record()
-            else:
-                failed.append("schedule")
+        # one message per day, chronological; the picture (both days) goes with the first one
+        if not sent:
+            plan = [(d, "show") for d in sorted(days)]                 # very first run
         else:
-            record()                                 # past-only edits: remember, don't announce
+            plan = []
+            for d in sorted(meaningful):
+                iso = d.isoformat()
+                kind = ("new" if iso not in sent else
+                        "change" if view[iso]["off"] != off_list(days[d]) else "maybe")
+                plan.append((d, kind))
+            if force and not plan:
+                plan = [(d, "show") for d in sorted(days)]
+        # morning digest: "Графік на сьогодні", unless today's news already went out this run
+        digest_due = (DIGEST_HOUR <= now.hour < 12 and state.get("digest") != today.isoformat()
+                      and today in days)
+        if digest_due and all(d != today for d, _ in plan):
+            plan.insert(0, (today, "digest"))
+
+        stamp = (src.get("fact") or {}).get("update", "—")
+        photo = picture(ref, days, today, stamp, direct) if plan else None
+        delivered = set()
+        for d, kind in plan:
+            prev = view.get(d.isoformat(), {}).get("off")
+            if send(day_message(kind, d, days[d], today, prev, stamp, direct), now, photo=photo):
+                delivered.add(d)
+                photo = None
+            else:
+                failed.append(f"schedule {d.isoformat()}")
+        if digest_due and today in delivered:      # any delivered message about today counts
+            state["digest"] = today.isoformat()
+        # remember every change that was delivered or didn't need a message (past-only edits)
+        for d in changed:
+            if d in delivered or d not in meaningful:
+                sent[d.isoformat()] = {"hash": schedule_hash(days[d]), "off": off_list(days[d]),
+                                       "s": encode_states(days[d])}
 
         # 2) reminders
         if REMIND_MIN:

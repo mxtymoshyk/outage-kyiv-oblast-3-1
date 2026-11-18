@@ -2,7 +2,8 @@
 
 Checks the DTEK Kyiv-oblast schedule for queue 3.1 every 10 minutes and sends to Telegram:
 
-- **Schedule**: when today's or tomorrow's schedule changes, or tomorrow's is published. Sent as a photo (the DTEK table, like Svitlobot) with a caption: a news line on top, then each day in order with exact times and what changed. If the image is unavailable, the text is sent without it.
+- **Schedule**: one message per day: a new day (🆕 tomorrow), a change (✏️, with "· було …" next to each changed outage), possible outages only (🟡). A photo (the DTEK table) goes with the first message.
+- **Morning digest** ☀️ "Графік на сьогодні" at the first run after `DIGEST_HOUR` (default 07:00), unless a message about today already went out this morning.
 - **Reminder** about 1 hour before each outage, including ones that run past midnight.
 - Messages between 23:00 and 07:00 arrive **silently** (no sound).
 - **Alert if the data source breaks** (no updates for 3+ hours, DTEK's site blocks the parser, or the data has no schedule for the queue) and a follow-up when it recovers. Silence never means "no changes" while the data is broken.
