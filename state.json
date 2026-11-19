@@ -1,14 +1,9 @@
 {
  "days": {
   "2026-11-19": {
-   "hash": "fa16037899f9",
-   "off": [
-    [
-     28,
-     35
-    ]
-   ],
-   "s": "ooooooooooooooooooooooooooooxxxxxxxooooooooooooo"
+   "hash": "25ecb11d88c0",
+   "off": [],
+   "s": "oooooooooooooooooooooooooooooooooooooooooooooooo"
   }
  },
  "reminded": [
@@ -18,7 +13,7 @@
   "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx",
   "2026-11-17": "xxxxxxooooooooooooxxxxxxxxooooooooooooooooxxxxxx",
   "2026-11-18": "oooooooooooooxxxxxxxooooooooooooooxxxxxxxxxooooo",
-  "2026-11-19": "ooooooooooooooooooooooooooooxxxxxxxooooooooooooo"
+  "2026-11-19": "oooooooooooooooooooooooooooooooooooooooooooooooo"
  },
  "health": {},
  "digest": "2026-11-19"
