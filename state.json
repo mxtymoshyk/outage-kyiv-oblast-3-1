@@ -16,7 +16,8 @@
   "2026-11-19": "oooooooooooooooooooooooooooooooooooooooooooooooo"
  },
  "health": {
-  "since": "2026-11-20T00:07+02:00"
+  "since": "2026-11-20T00:07+02:00",
+  "alerted": true
  },
  "digest": "2026-11-19"
 }
