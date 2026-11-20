@@ -1,45 +1,32 @@
 {
  "days": {
-  "2026-11-20": {
-   "hash": "1fee1713d3f3",
+  "2026-11-21": {
+   "hash": "f5d289b7260a",
    "off": [
     [
-     22,
-     32
+     0,
+     3
     ],
     [
-     41,
-     48
-    ]
-   ],
-   "s": "ooooooooooooooooooooooxxxxxxxxxxoooooooooxxxxxxx"
-  },
-  "2026-11-21": {
-   "hash": "608f3785b0ab",
-   "off": [
-    [
-     15,
+     13,
      25
     ],
     [
      36,
-     45
+     47
     ]
    ],
-   "s": "oooooooooooooooxxxxxxxxxxoooooooooooxxxxxxxxxooo"
+   "s": "xxxooooooooooxxxxxxxxxxxxoooooooooooxxxxxxxxxxxo"
   }
  },
- "reminded": [
-  "2026-11-20@11:00",
-  "2026-11-20@20:30"
- ],
+ "reminded": [],
  "cal": {
   "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx",
   "2026-11-17": "xxxxxxooooooooooooxxxxxxxxooooooooooooooooxxxxxx",
   "2026-11-18": "oooooooooooooxxxxxxxooooooooooooooxxxxxxxxxooooo",
   "2026-11-19": "oooooooooooooooooooooooooooooooooooooooooooooooo",
   "2026-11-20": "ooooooooooooooooooooooxxxxxxxxxxoooooooooxxxxxxx",
-  "2026-11-21": "oooooooooooooooxxxxxxxxxxoooooooooooxxxxxxxxxooo"
+  "2026-11-21": "xxxooooooooooxxxxxxxxxxxxoooooooooooxxxxxxxxxxxo"
  },
  "health": {},
  "digest": "2026-11-20"
