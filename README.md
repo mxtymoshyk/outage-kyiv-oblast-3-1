@@ -21,6 +21,7 @@ Data: [outage-data-ua](https://github.com/Baskerville42/outage-data-ua), a mirro
 2. Send the bot a message, then open `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `chat.id`.
 3. Repo → Settings → Secrets and variables → Actions: add `TG_TOKEN` and `TG_CHAT_ID`. For several recipients, separate the IDs with commas: `123456789,987654321`. Each person must press Start in the bot first.
 4. Actions → "Outage schedule → Telegram" → Run workflow.
+5. Optional dead-man's switch: create a check on healthchecks.io (period 15 min, grace 20 min) and add its ping URL as the secret `HC_PING_URL`. Every run pings it (`/fail` when the run fails), so you hear when runs stop or break.
 
 ## Settings (`env:` in `.github/workflows/outage.yml`)
 | Variable | Default | What it does |

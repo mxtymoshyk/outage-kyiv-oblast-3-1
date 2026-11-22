@@ -43,3 +43,15 @@ jobs:
             git pull --rebase origin main
             git push
           fi
+      - name: Ping healthchecks.io
+        # Dead-man's switch: healthchecks.io messages Telegram when the runs stop (cron-job.org or
+        # GitHub down) or a run fails. No secret, no ping. Never fails the run itself.
+        if: always()
+        env:
+          HC_PING_URL: ${{ secrets.HC_PING_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          [ -n "$HC_PING_URL" ] || exit 0
+          url="$HC_PING_URL"
+          [ "$JOB_STATUS" = "success" ] || url="$HC_PING_URL/fail"
+          curl -fsS -m 10 --retry 3 -o /dev/null "$url" || true
