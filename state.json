@@ -1,19 +1,5 @@
 {
  "days": {
-  "2026-11-23": {
-   "hash": "dbb37c59573e",
-   "off": [
-    [
-     22,
-     36
-    ],
-    [
-     45,
-     48
-    ]
-   ],
-   "s": "ooooooooooooooooooooooxxxxxxxxxxxxxxoooooooooxxx"
-  },
   "2026-11-24": {
    "hash": "ee14967e0276",
    "off": [
@@ -33,10 +19,7 @@
    "s": "xxooooooooooooooxxxxxxxxxxxxxooooooooooooxxxoooo"
   }
  },
- "reminded": [
-  "2026-11-23@11:00",
-  "2026-11-23@22:30"
- ],
+ "reminded": [],
  "cal": {
   "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx",
   "2026-11-17": "xxxxxxooooooooooooxxxxxxxxooooooooooooooooxxxxxx",
