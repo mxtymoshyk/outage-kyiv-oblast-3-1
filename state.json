@@ -15,7 +15,9 @@
    "s": "ooooooooooooooooxxxxxxoooooooooooooxxxxxxooooooo"
   }
  },
- "reminded": [],
+ "reminded": [
+  "2026-11-25@08:00"
+ ],
  "cal": {
   "2026-11-16": "oooooooooooooooooooxxxxxxxxxxxxxoooooooooooooxxx",
   "2026-11-17": "xxxxxxooooooooooooxxxxxxxxooooooooooooooooxxxxxx",
@@ -29,5 +31,5 @@
   "2026-11-25": "ooooooooooooooooxxxxxxoooooooooooooxxxxxxooooooo"
  },
  "health": {},
- "digest": "2026-11-24"
+ "digest": "2026-11-25"
 }
