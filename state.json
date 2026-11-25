@@ -13,6 +13,20 @@
     ]
    ],
    "s": "ooooooooooooooooxxxxxxxxxooooooooooxxxxxxooooooo"
+  },
+  "2026-11-26": {
+   "hash": "144fd90a90f2",
+   "off": [
+    [
+     12,
+     17
+    ],
+    [
+     28,
+     40
+    ]
+   ],
+   "s": "ooooooooooooxxxxxoooooooooooxxxxxxxxxxxxoooooooo"
   }
  },
  "reminded": [
@@ -29,7 +43,8 @@
   "2026-11-22": "oooooooooooooooooooooooooooooooxxxxxxxxooooooooo",
   "2026-11-23": "ooooooooooooooooooooooxxxxxxxxxxxxxxoooooooooxxx",
   "2026-11-24": "xxooooooooooooooxxxxxxxxxxxoooooooooooooxxxxxxxx",
-  "2026-11-25": "ooooooooooooooooxxxxxxxxxooooooooooxxxxxxooooooo"
+  "2026-11-25": "ooooooooooooooooxxxxxxxxxooooooooooxxxxxxooooooo",
+  "2026-11-26": "ooooooooooooxxxxxoooooooooooxxxxxxxxxxxxoooooooo"
  },
  "health": {},
  "digest": "2026-11-25"
